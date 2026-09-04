@@ -8,6 +8,7 @@
 #![allow(clippy::print_stdout)]
 
 mod allow;
+mod baseline;
 mod cli;
 mod commands;
 mod error;

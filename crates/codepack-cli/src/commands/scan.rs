@@ -42,6 +42,39 @@ pub(crate) struct ScanReport {
     /// Where the allowlist was read from, when one was used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowlist: Option<String>,
+    /// Findings held back by a baseline: they were already there when it was recorded.
+    /// Separate from `suppressed` because they mean something weaker — nobody reviewed
+    /// them, they were merely present.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub baselined: Vec<crate::allow::SuppressedFinding>,
+    /// Where the baseline was read from, when one was used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<String>,
+}
+
+/// The two baseline paths a caller may supply. Threaded as one value so every entry
+/// point takes the same shape, and so a caller that has no baseline says so once.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct BaselineOptions<'a> {
+    /// Findings listed here are not reported: they were already present.
+    pub read: Option<&'a std::path::Path>,
+    /// Where to record the findings that survived the allowlist.
+    pub write: Option<&'a std::path::Path>,
+}
+
+impl<'a> BaselineOptions<'a> {
+    pub(crate) fn from_args(args: &'a ScanArgs) -> Self {
+        Self {
+            read: args.baseline.as_deref(),
+            write: args.write_baseline.as_deref(),
+        }
+    }
+}
+
+/// What a baseline held back on this run.
+struct BaselineScreen {
+    path: std::path::PathBuf,
+    suppressed: Vec<crate::allow::SuppressedFinding>,
 }
 
 /// What a history walk actually covered. Every field here exists so a partial answer
@@ -102,12 +135,13 @@ pub(crate) struct ReportedFinding {
 
 pub(crate) fn run(args: &ScanArgs, format: Format) -> Result<Outcome> {
     let context = commands::prepare(&args.project)?;
+    let baseline_options = BaselineOptions::from_args(args);
     let report = if args.staged {
-        build_staged(&context, args.fail_on)?
+        build_staged(&context, args.fail_on, baseline_options)?
     } else if args.history {
         build_history(&context, args)?
     } else {
-        build(&context, args.fail_on)?
+        build(&context, args.fail_on, baseline_options)?
     };
 
     if let Some(path) = &args.sarif {
@@ -173,7 +207,11 @@ fn write_sarif(report: &ScanReport, path: &std::path::Path) -> Result<()> {
         .map_err(|error| crate::error::CliError::message(error.to_string()))
 }
 
-pub(crate) fn build(context: &ProjectContext, fail_on: SeverityArg) -> Result<ScanReport> {
+pub(crate) fn build(
+    context: &ProjectContext,
+    fail_on: SeverityArg,
+    baseline_options: BaselineOptions<'_>,
+) -> Result<ScanReport> {
     let cancel = CancellationToken::new();
 
     // Scanned with safe mode forced to `full`, meaning "exclude nothing on safety
@@ -229,12 +267,13 @@ pub(crate) fn build(context: &ProjectContext, fail_on: SeverityArg) -> Result<Sc
         &cancel,
     )?;
 
-    let screened = screen_with_allowlist(&context.root, &result)?;
+    let (screened, baseline) = screen_all(&context.root, baseline_options, &result)?;
     Ok(assemble(
         context,
         "project",
         relative_files.len(),
         &screened,
+        baseline.as_ref(),
         fail_on,
         None,
         &Origins::default(),
@@ -274,7 +313,8 @@ pub(crate) fn build_history(context: &ProjectContext, args: &ScanArgs) -> Result
     };
 
     let (result, origins) = relabel_onto_repository_paths(&result, &history);
-    let screened = screen_with_allowlist(&context.root, &result)?;
+    let (screened, baseline) =
+        screen_all(&context.root, BaselineOptions::from_args(args), &result)?;
 
     let summary = HistorySummary {
         commits_walked: history.commits_walked,
@@ -288,6 +328,7 @@ pub(crate) fn build_history(context: &ProjectContext, args: &ScanArgs) -> Result
         "history",
         relative_files.len(),
         &screened,
+        baseline.as_ref(),
         args.fail_on,
         Some(summary),
         &origins,
@@ -370,7 +411,11 @@ fn display_of(relative: &std::path::Path) -> String {
 /// directory the staged blobs were unpacked into: `.codepack-allow` is a property of the
 /// repository, and a staged scan that ignored it would report findings a team has
 /// already accepted — the exact noise this feature exists to remove.
-pub(crate) fn build_staged(context: &ProjectContext, fail_on: SeverityArg) -> Result<ScanReport> {
+pub(crate) fn build_staged(
+    context: &ProjectContext,
+    fail_on: SeverityArg,
+    baseline_options: BaselineOptions<'_>,
+) -> Result<ScanReport> {
     let cancel = CancellationToken::new();
     let staged = crate::staged::collect(&context.root)?;
 
@@ -389,12 +434,13 @@ pub(crate) fn build_staged(context: &ProjectContext, fail_on: SeverityArg) -> Re
         )?
     };
 
-    let screened = screen_with_allowlist(&context.root, &result)?;
+    let (screened, baseline) = screen_all(&context.root, baseline_options, &result)?;
     Ok(assemble(
         context,
         "staged",
         staged.relative_files().len(),
         &screened,
+        baseline.as_ref(),
         fail_on,
         None,
         &Origins::default(),
@@ -411,6 +457,46 @@ fn screen_with_allowlist(
     })
 }
 
+/// The allowlist first, then `--write-baseline`, then `--baseline`, in that order.
+///
+/// Order matters and is not arbitrary. The allowlist runs first because an accepted
+/// finding is accepted, full stop — recording it in a baseline as well would be noise.
+/// A baseline is then *written* from what survives, which is exactly the set a team
+/// wants frozen. And `--baseline` filters last, so what is reported is what is genuinely
+/// new.
+fn screen_all(
+    project_root: &std::path::Path,
+    baseline_options: BaselineOptions<'_>,
+    result: &ScanResult,
+) -> Result<(crate::allow::Screened, Option<BaselineScreen>)> {
+    let screened = screen_with_allowlist(project_root, result)?;
+
+    if let Some(path) = baseline_options.write {
+        let written = crate::baseline::write(path, project_root, &screened.to_result())?;
+        output::note(format!(
+            "baseline written to {} ({written} finding(s))",
+            path.display()
+        ));
+    }
+
+    let Some(path) = baseline_options.read else {
+        return Ok((screened, None));
+    };
+    let index = crate::baseline::load(path)?;
+    let after = crate::allow::screen(&screened.to_result(), path, &index);
+    Ok((
+        crate::allow::Screened {
+            findings: after.findings,
+            suppressed: screened.suppressed,
+            allowlist_path: screened.allowlist_path,
+        },
+        Some(BaselineScreen {
+            path: path.to_path_buf(),
+            suppressed: after.suppressed,
+        }),
+    ))
+}
+
 /// Builds the report from the findings that **survived** the allowlist.
 ///
 /// The summary counts are recomputed from the survivors rather than copied from
@@ -422,6 +508,7 @@ fn assemble(
     source: &'static str,
     scanned_files: usize,
     screened: &crate::allow::Screened,
+    baseline: Option<&BaselineScreen>,
     fail_on: SeverityArg,
     history: Option<HistorySummary>,
     origins: &Origins,
@@ -477,6 +564,10 @@ fn assemble(
             .allowlist_path
             .as_ref()
             .map(|path| path.display().to_string()),
+        baselined: baseline
+            .map(|baseline| baseline.suppressed.clone())
+            .unwrap_or_default(),
+        baseline: baseline.map(|baseline| baseline.path.display().to_string()),
     }
 }
 
@@ -503,6 +594,7 @@ fn print_human(report: &ScanReport) {
     ));
     print_history_notice(report);
     print_suppression_notice(report);
+    print_baseline_notice(report);
     output::line("");
 
     if report.findings.is_empty() {
@@ -605,6 +697,26 @@ fn print_suppression_notice(report: &ScanReport) {
     }
 }
 
+/// Says how many findings the baseline held back, and from which file.
+///
+/// Printed for the same reason as the allowlist notice, and separately from it: the two
+/// mean different things. An allowlisted finding was read by somebody; a baselined one
+/// was merely already there. Counts only — listing several hundred entries a team has
+/// deliberately frozen would bury the finding the run exists to show.
+fn print_baseline_notice(report: &ScanReport) {
+    let Some(path) = &report.baseline else {
+        return;
+    };
+    if report.baselined.is_empty() {
+        output::line(format!("Baseline:  {path} (nothing held back)"));
+        return;
+    }
+    output::line(format!(
+        "Baseline:  {path} — {} finding(s) already recorded and not shown below.",
+        report.baselined.len()
+    ));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,7 +755,12 @@ mod tests {
             max_text_file_mb: 1,
             ..Config::default()
         };
-        let report = build(&context_with(dir.path(), config), SeverityArg::Critical).unwrap();
+        let report = build(
+            &context_with(dir.path(), config),
+            SeverityArg::Critical,
+            BaselineOptions::default(),
+        )
+        .unwrap();
 
         assert!(
             report.summary.total_findings > 0,
@@ -707,6 +824,8 @@ mod tests {
             history: true,
             since: None,
             max_commits: None,
+            baseline: None,
+            write_baseline: None,
             sarif: None,
             fail_on: SeverityArg::Critical,
         }
@@ -720,7 +839,8 @@ mod tests {
         repository_with_a_deleted_secret(dir.path());
         let context = context_with(dir.path(), Config::default());
 
-        let working_tree = build(&context, SeverityArg::Critical).unwrap();
+        let working_tree =
+            build(&context, SeverityArg::Critical, BaselineOptions::default()).unwrap();
         assert_eq!(
             working_tree.summary.potential_secrets, 0,
             "the working tree really is clean"
@@ -784,7 +904,8 @@ mod tests {
         .unwrap();
 
         let context = context_with(dir.path(), Config::default());
-        let default_run = build(&context, SeverityArg::Critical).unwrap();
+        let default_run =
+            build(&context, SeverityArg::Critical, BaselineOptions::default()).unwrap();
         assert!(
             default_run.summary.total_findings > 0,
             "the finding must still be reported"
@@ -794,7 +915,7 @@ mod tests {
             "the published exit-code contract gates on critical only"
         );
 
-        let raised = build(&context, SeverityArg::High).unwrap();
+        let raised = build(&context, SeverityArg::High, BaselineOptions::default()).unwrap();
         assert!(
             raised.summary.gating > 0,
             "--fail-on high must gate on the same finding"
@@ -821,6 +942,7 @@ mod tests {
         let report = build(
             &context_with(dir.path(), Config::default()),
             SeverityArg::Critical,
+            BaselineOptions::default(),
         )
         .unwrap();
         let sarif = dir.path().join("out").join("scan.sarif");
@@ -849,6 +971,7 @@ mod tests {
         let report = build(
             &context_with(dir.path(), Config::default()),
             SeverityArg::Critical,
+            BaselineOptions::default(),
         )
         .unwrap();
         let reported = &report.findings[0].file;

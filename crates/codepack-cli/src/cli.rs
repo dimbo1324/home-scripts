@@ -224,6 +224,22 @@ pub(crate) struct ScanArgs {
     #[arg(long, value_name = "N", requires = "history")]
     pub max_commits: Option<usize>,
 
+    /// Report only findings that are not already recorded in this baseline file.
+    ///
+    /// Distinct from `.codepack-allow`, which means "reviewed and accepted, here is
+    /// why". A baseline means only "already present when we started counting", which is
+    /// the question a team has on the day they adopt the tool: fail the build on the
+    /// next one, not on the four hundred that were here first.
+    #[arg(long, value_name = "FILE")]
+    pub baseline: Option<PathBuf>,
+
+    /// Record the current findings as a baseline in this file.
+    ///
+    /// Written from what survives the allowlist, so a finding that is already accepted
+    /// is not frozen a second time.
+    #[arg(long, value_name = "FILE")]
+    pub write_baseline: Option<PathBuf>,
+
     /// Also write the findings as SARIF 2.1.0 to this file.
     ///
     /// The same writer the export pipeline uses, so a scan and an export describe a

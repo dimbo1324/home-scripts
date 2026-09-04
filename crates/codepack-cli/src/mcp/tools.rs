@@ -331,8 +331,18 @@ fn scan(arguments: &Value) -> ToolOutcome {
 
     let mode = string_argument(arguments, "mode").unwrap_or("working_tree");
     let built = match mode {
-        "working_tree" => commands::scan::build(&context, SeverityArg::Critical),
-        "staged" => commands::scan::build_staged(&context, SeverityArg::Critical),
+        // No baseline from here: an agent asking "is there a secret in this project"
+        // wants every answer, not the ones a file says are old news.
+        "working_tree" => commands::scan::build(
+            &context,
+            SeverityArg::Critical,
+            commands::scan::BaselineOptions::default(),
+        ),
+        "staged" => commands::scan::build_staged(
+            &context,
+            SeverityArg::Critical,
+            commands::scan::BaselineOptions::default(),
+        ),
         "history" => {
             let args = ScanArgs {
                 project: project_args(arguments),
@@ -343,6 +353,8 @@ fn scan(arguments: &Value) -> ToolOutcome {
                     .get("max_commits")
                     .and_then(Value::as_u64)
                     .and_then(|value| usize::try_from(value).ok()),
+                baseline: None,
+                write_baseline: None,
                 sarif: None,
                 fail_on: SeverityArg::Critical,
             };
