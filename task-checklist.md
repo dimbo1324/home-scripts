@@ -1,83 +1,114 @@
 # Task Checklist
 
-**Task:** An MCP server as the third entry point — `codepack mcp`, so a coding agent can
-ask `preview`, `scan`, `explain` and `export` itself instead of being handed a bundle.
+**Task:** Implement the improvement batch proposed on 2026-09-05 — business logic only.
 
-**Date:** 2026-08-06
-**Branch:** feat/mcp-server
+**Date:** 2026-09-05
+**Branch:** feat/scan-perf-allowlist-mcp-ui
 
-Owner instruction, 2026-08-06: implement proposal 2 (the MCP server), run every test
-again, then push to `main`.
+Owner instruction, 2026-09-05: implement **every** proposal from the preceding message,
+and *only* the business logic. Explicitly out of scope by owner instruction: writing
+tests, writing or updating documentation, and running the app / the gate. Compilation
+checks (`cargo check`) are used as a correctness tool for the edits themselves — code
+that does not build is not delivered work.
+
+**Standing debt this task deliberately creates** (owner asked for the code now, the rest
+later): no new tests for any of the behaviour below; no `README.md`,
+`docs/architecture/overview.md` or `docs/__arch__/ROADMAP.md` updates; no decision
+records in `docs/__arch__/open-questions.md` for the two owner decisions this task acts
+on (the I5 format change in item 5 and the severity-assignment change in item 3).
 
 ## Preparation
 
-- [+] Read what the CLI commands already build, so the tools answer exactly what the
-      commands answer rather than becoming a second implementation
-- [+] Commit this checklist before the work
+- [ ] Branch from up-to-date `main`, commit this checklist before the work
 
-## Decisions made honestly, before code
+## Business logic
 
-- [+] **Where it lives.** The original proposal said "a thin crate over
-      `codepack-engine`". Reading the code said otherwise: `preview`, `scan` and
-      `explain` are not engine calls — they are the CLI's four-layer config resolution,
-      its forced `full` safe mode for scanning, its budget handling and its report
-      shapes. It went into `codepack-cli` as a directory module instead, and the
-      estimate is corrected out loud in the module doc, the ROADMAP and the decisions log
-- [+] **stdio only.** JSON-RPC 2.0 over newline-delimited stdin/stdout. No new
-      dependency, so invariant I1 and the gate's network-isolation step are untouched
-- [+] **stdout carries protocol and nothing else.** The export tool runs quiet; progress
-      still goes to stderr. The end-to-end test fails on any non-JSON line on stdout, so
-      this is checked rather than asserted in a comment
+1. Parallel content scan
 
-## Implementation
+- [ ] `codepack-security` takes `rayon`; `scan_project`'s per-file loop becomes an
+      ordered parallel map so finding order stays byte-identical (golden references and
+      SARIF depend on it), cancellation still checked per file
 
-- [+] `mcp/protocol.rs` — JSON-RPC envelopes, error codes, the one-line framing
-- [+] `mcp/tools.rs` — four tools with JSON schemas and annotations, dispatching onto the
-      existing command builders
-- [+] `mcp/mod.rs` — the read/dispatch/write loop, `initialize`/`ping`/`tools/list`/
-      `tools/call`
-- [+] `commands::export` split into `run` (printing, exit code) and `build` (the work),
-      the shape `preview`/`scan`/`explain` already had
-- [+] `codepack mcp` subcommand
-- [+] A tool failure is `isError: true` inside a successful result; JSON-RPC errors are
-      reserved for protocol faults
-- [+] The preview file list is capped at 400 and reports `files_truncated`/`files_total`
+2. Scan-result cache keyed by content hash
+
+- [ ] `codepack-storage` migration 2: a cache table keyed by `sha256` + a detector
+      fingerprint, so a changed detector never serves stale findings
+- [ ] `codepack-engine` consults the cache before scanning and fills it afterwards
+
+3. Offline provider-token checksum validation
+
+- [ ] GitHub's documented `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_` checksum
+      (base62 CRC32 of the body) verified in `codepack-security::patterns::provider`
+- [ ] A failing checksum **downgrades** the finding rather than dropping it: recall is
+      never traded for precision (I9), and a wrong algorithm must not be able to hide a
+      real token
+
+4. Release checksums (the part of S14 that is not a certificate)
+
+- [ ] `cargo xtask package` writes `SHA256SUMS.txt` beside the installer
+- [ ] Code signing / notarisation: **not done** — needs a certificate the repository
+      does not and must not hold
+
+5. Redaction labels reach the scan artifacts (Q34, invariant I5)
+
+- [ ] `Finding` carries the stable per-secret label; `06_security_scan.json` and SARIF
+      emit it; `schema_version` bumped on both
+
+6. `.codepack-allow` honoured beyond `scan`/`verify` (Q26)
+
+- [ ] The export pipeline and the reports filter accepted findings through the same
+      allowlist the CLI already uses
+
+7. `scan --baseline`
+
+- [ ] Report only what is not present in a stored baseline of the working tree, and be
+      able to write that baseline
+
+8. Strict pre-commit hook (Q35)
+
+- [ ] `codepack init --hook --strict` writes a hook that fails the commit when the
+      binary is missing instead of warning and passing
+
+9. MCP: cancellation and resources (Q37)
+
+- [ ] `notifications/cancelled` observed by a running tool call through the engine's
+      existing cancellation token
+- [ ] `resources/list` + `resources/read` over a produced bundle
+
+10. Parallel report generation
+
+- [ ] Independent reports built in parallel, cancellation still observed
+
+11. Artifact localization (Q12)
+
+- [ ] The report catalogue's strings go through the localization layer rather than one
+      pilot report
+
+12. `explain` in the desktop app
+
+- [ ] A Tauri command over the CLI's own explain builder and the minimum UI to reach it
+
+13. The S13 API path gets its door
+
+- [ ] Config fields, Tauri commands and the minimum UI for the key, the model and the
+      explicit send confirmation
+
+## Not done in this task, and why
+
+- [ ] Fuzzing the archive-extraction and tree-sitter paths — that is test code, excluded
+      by the owner's instruction
+- [ ] README screenshots — needs the app to be run, excluded by the owner's instruction
+- [ ] `deny.toml` gtk/gdk advisory ignores — removing one blind can turn the gate red;
+      it needs a `cargo tree` verification run, excluded by the owner's instruction
+- [ ] `AGENTS.md` size budget (Q22) — a rules/documentation change, excluded
+- [ ] Linux/macOS gate diagnosis (Q21) — needs runs on those platforms
 
 ## Verification
 
-- [+] 152 unit tests in `codepack-cli` (up from 121): protocol shapes, notifications
-      answered with silence, malformed input mid-session, unknown method, unknown tool,
-      unknown safe mode, each tool's dispatch, the cap
-- [+] 76 end-to-end tests (up from 70): six of them spawn the real binary and speak the
-      protocol over pipes — handshake, `tools/list`, `explain` on a `.env`, `scan`,
-      a real `export`, a tool failure, a malformed message mid-session
-- [+] `cargo xtask fmt`
-- [+] `cargo xtask gate` — all eight sections green
-- [+] A real session driven by hand: an agent asking why `.env` is missing gets
-      `verdict=excluded, reason=high-risk credential filename`
-- [+] Whole suite re-run under a runner-style short `TEMP` — 56/56, the condition that
-      broke CI on the previous task
-- [+] Self-review of the diff: 12 files, no stray files, no new dependency
-
-## Documentation
-
-- [+] `README.md` — a section with the `claude mcp add` line, the JSON config and the
-      four tools; the commands table and "what you get"
-- [+] `docs/architecture/overview.md` — the third surface, why it is not a third front
-      end, and the no-cancellation limit under known debt
-- [+] `docs/__arch__/ROADMAP.md` — an S13 addendum, including the corrected estimate
-- [+] `docs/__arch__/open-questions.md` — the decision record, Q37 and Q38
+- [ ] `cargo check --workspace --all-targets` clean (compilation only; no test run, no
+      gate, by owner instruction)
 
 ## Completion
 
-- [+] Checklist filled with `+`/`-`
-- [+] Merge into `main` fast-forward, push to `origin/main`
-- [+] Final report
-
-## Debt carried out of this task
-
-- Q37: one request at a time, no cancellation — a long export cannot be interrupted from
-  the client, even though the engine supports it.
-- Q38: the protocol version is a constant; a new MCP revision needs a code change.
-- No `resources` or `prompts` capability, and no handoff tool (an agent handing a bundle
-  to itself is a circle).
+- [ ] Checklist filled with `+`/`-`
+- [ ] Final report in Russian, naming every piece of deferred work honestly
