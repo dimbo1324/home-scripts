@@ -36,6 +36,7 @@ mod orchestrator;
 mod paths;
 mod plan;
 mod relpath;
+mod scan_cache;
 mod storage;
 mod structure;
 mod text_dump;

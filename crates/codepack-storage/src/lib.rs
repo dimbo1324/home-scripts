@@ -35,6 +35,7 @@ mod migrations;
 mod project;
 mod retention;
 mod run;
+pub mod scan_cache;
 mod types;
 
 pub use baseline::latest_snapshot;
@@ -46,6 +47,7 @@ pub use project::{find_or_create_project, find_project_id};
 pub use retention::cleanup_old_runs;
 pub use run::record_export_run;
 pub use rusqlite::Connection;
+pub use scan_cache::{load_scan_cache, prune_scan_cache, store_scan_cache};
 pub use types::{
     NewArchivePart, NewExportRun, NewFinding, NewRunFile, NewSnapshot, NewSnapshotFile,
     StoredSnapshot, StoredSnapshotFile,

@@ -13,8 +13,9 @@ use std::path::{Path, PathBuf};
 
 use codepack_core::CancellationToken;
 use rayon::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use crate::cache;
 use crate::classify;
 use crate::constants;
 use crate::error::{Result, SecurityError};
@@ -22,7 +23,7 @@ use crate::patterns::{
     checksum, confidence_rank, credentials, entropy, keyword, prefilter, provider, risky_code,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingKind {
     SensitiveFile,
@@ -81,7 +82,7 @@ pub fn result_from_findings(findings: Vec<Finding>) -> ScanResult {
 /// What a caller may vary about a scan. Everything defaults to the behaviour every
 /// release so far produced, so [`scan_project`] and
 /// [`scan_project_with_options`] with a default value are the same run.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Clone, Copy, Default)]
 pub struct ScanOptions<'a> {
     /// Redactor used to build every finding message.
     ///
@@ -103,6 +104,26 @@ pub struct ScanOptions<'a> {
     /// published — see [`crate::patterns::checksum`] for why an unverifiable algorithm
     /// may not be allowed to demote a real token.
     pub strict_token_checksums: bool,
+    /// Where an already-scanned file's content-derived findings may be reused from.
+    ///
+    /// `None` scans everything, which is what every release so far did. See
+    /// [`crate::cache`] for what is cacheable, what the key has to cover, and why the
+    /// store itself lives outside this crate.
+    pub cache: Option<&'a dyn crate::cache::FileScanCache>,
+}
+
+/// Written out rather than derived: a cache is a trait object, and requiring every
+/// implementation to be `Debug` for the sake of this line would be the tail wagging the
+/// dog. Whether one is present is the only part worth printing anyway.
+impl std::fmt::Debug for ScanOptions<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScanOptions")
+            .field("redactor", &self.redactor)
+            .field("strict_token_checksums", &self.strict_token_checksums)
+            .field("cache", &self.cache.map(|_| "present"))
+            .finish()
+    }
 }
 
 fn file_name_lower(path: &Path) -> String {
@@ -133,27 +154,6 @@ fn sensitive_file_severity(relative: &Path) -> Option<&'static str> {
     let critical =
         name.starts_with(".env") || matches!(suffix.as_str(), "key" | "pem" | "p12" | "pfx");
     Some(if critical { "critical" } else { "high" })
-}
-
-fn read_text_for_scan(path: &Path) -> Result<Option<String>> {
-    let raw = fs::read(path).map_err(|source| SecurityError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if classify::looks_binary(&raw) {
-        return Ok(None);
-    }
-    match String::from_utf8(raw) {
-        Ok(text) => Ok(Some(text)),
-        // Documented encoding-scope gap: legacy tries 6 encodings
-        // (utf-8, utf-8-sig, cp1251, cp866, utf-16, latin-1); this stage reads UTF-8
-        // with a lossy fallback only. The full chain's real owner is S9's text-dump
-        // step — pulling in an encoding-detection dependency for S3 alone would be
-        // scope creep.
-        Err(err) => Ok(Some(
-            String::from_utf8_lossy(&err.into_bytes()).into_owned(),
-        )),
-    }
 }
 
 struct SecretHit {
@@ -420,19 +420,19 @@ struct FileRecord {
 }
 
 struct SecretRecord {
-    confidence: &'static str,
+    confidence: String,
     display: String,
     line_number: usize,
-    rule: &'static str,
+    rule: String,
     message: String,
 }
 
 struct RiskyRecord {
-    severity: &'static str,
+    severity: String,
     display: String,
     line_number: usize,
-    rule: &'static str,
-    explanation: &'static str,
+    rule: String,
+    explanation: String,
 }
 
 /// Everything one file contributes, kept together so the parallel pass can hand back a
@@ -476,11 +476,62 @@ fn scan_one_file(
     {
         return Ok(records);
     }
-    let Some(text) = read_text_for_scan(&absolute)? else {
+    let raw = fs::read(&absolute).map_err(|source| SecurityError::Read {
+        path: absolute.clone(),
+        source,
+    })?;
+    if classify::looks_binary(&raw) {
         return Ok(records);
-    };
+    }
     let display = paths::rel_display(relative);
 
+    // A labelling run cannot reuse a cached message. `<REDACTED:s1>` is numbered per
+    // run, in the order that run happens to meet its secrets, so a message stored by an
+    // earlier run would carry a number standing for a different value here — and the
+    // bundle's scan report would disagree with its own text dump. Correctness first: the
+    // labelled run simply scans.
+    let cache = options
+        .cache
+        .filter(|_| !options.redactor.is_some_and(crate::Redactor::is_labelled));
+    let key = cache.map(|_| cache::cache_key(&raw, options.strict_token_checksums));
+
+    if let (Some(cache), Some(key)) = (cache, key.as_deref())
+        && let Some(cached) = cache.lookup(key)
+    {
+        restore_cached(&mut records, &display, cached);
+        return Ok(records);
+    }
+
+    scan_text_into(&mut records, &decode_text(raw), &display, options);
+
+    if let (Some(cache), Some(key)) = (cache, key.as_deref()) {
+        // Stored even when empty: "these bytes contain nothing" is the answer worth
+        // most, since it is the common one.
+        cache.store(key, &cached_entries(&records));
+    }
+
+    Ok(records)
+}
+
+/// Bytes to text, with legacy's documented encoding-scope gap: legacy tries six
+/// encodings (utf-8, utf-8-sig, cp1251, cp866, utf-16, latin-1); this stage reads UTF-8
+/// with a lossy fallback only. The full chain's real owner is the pipeline's text-dump
+/// step — pulling an encoding-detection dependency into the detector alone would be
+/// scope creep.
+fn decode_text(raw: Vec<u8>) -> String {
+    match String::from_utf8(raw) {
+        Ok(text) => text,
+        Err(err) => String::from_utf8_lossy(&err.into_bytes()).into_owned(),
+    }
+}
+
+/// The per-line detector pass, appending to this file's records.
+fn scan_text_into(
+    records: &mut FileScanRecords,
+    text: &str,
+    display: &str,
+    options: &ScanOptions<'_>,
+) {
     for (idx, line) in text.lines().enumerate() {
         let line_number = idx + 1;
         let secret_hits = collect_secret_hits(line, options.strict_token_checksums);
@@ -491,26 +542,77 @@ fn scan_one_file(
             let message = redacted_message(line, options.redactor);
             for hit in secret_hits {
                 records.secrets.push(SecretRecord {
-                    confidence: hit.confidence,
-                    display: display.clone(),
+                    confidence: hit.confidence.to_string(),
+                    display: display.to_string(),
                     line_number,
-                    rule: hit.rule,
+                    rule: hit.rule.to_string(),
                     message: message.clone(),
                 });
             }
         }
         for hit in collect_risky_hits(line) {
             records.risky.push(RiskyRecord {
-                severity: hit.severity,
-                display: display.clone(),
+                severity: hit.severity.to_string(),
+                display: display.to_string(),
                 line_number,
-                rule: hit.rule,
-                explanation: hit.explanation,
+                rule: hit.rule.to_string(),
+                explanation: hit.explanation.to_string(),
             });
         }
     }
+}
 
-    Ok(records)
+/// This file's content-derived records as cache entries, in the order they were found.
+///
+/// The filename-derived `sensitive_filename` record is deliberately absent: it is a fact
+/// about the path, not the bytes, and caching it under a content key would report
+/// `.env`'s severity for a copy saved as `notes.txt`.
+fn cached_entries(records: &FileScanRecords) -> Vec<cache::CachedFinding> {
+    let secrets = records.secrets.iter().map(|secret| cache::CachedFinding {
+        kind: FindingKind::PotentialSecret,
+        severity: secret.confidence.clone(),
+        confidence: secret.confidence.clone(),
+        line: secret.line_number,
+        rule: secret.rule.clone(),
+        message: secret.message.clone(),
+    });
+    let risky = records.risky.iter().map(|hit| cache::CachedFinding {
+        kind: FindingKind::RiskyCode,
+        severity: hit.severity.clone(),
+        confidence: risky_code::RISKY_CODE_FINDING_CONFIDENCE.to_string(),
+        line: hit.line_number,
+        rule: hit.rule.clone(),
+        message: hit.explanation.clone(),
+    });
+    secrets.chain(risky).collect()
+}
+
+/// The inverse of [`cached_entries`]: each entry goes back into the bucket its kind
+/// names, which restores both buckets' original relative order because the two were
+/// concatenated in that order when stored.
+fn restore_cached(records: &mut FileScanRecords, display: &str, cached: Vec<cache::CachedFinding>) {
+    for entry in cached {
+        match entry.kind {
+            FindingKind::PotentialSecret => records.secrets.push(SecretRecord {
+                confidence: entry.confidence,
+                display: display.to_string(),
+                line_number: entry.line,
+                rule: entry.rule,
+                message: entry.message,
+            }),
+            FindingKind::RiskyCode => records.risky.push(RiskyRecord {
+                severity: entry.severity,
+                display: display.to_string(),
+                line_number: entry.line,
+                rule: entry.rule,
+                explanation: entry.message,
+            }),
+            // A content cache never holds one, and a stored entry claiming otherwise is
+            // from a build whose recipe differed; ignoring it is safer than trusting a
+            // path-derived verdict from another file.
+            FindingKind::SensitiveFile => {}
+        }
+    }
 }
 
 /// Scans a caller-supplied list of files (relative to `root`) for sensitive filenames,
@@ -581,19 +683,19 @@ pub fn scan_project_with_options(
     }
 
     files.sort_by(|a, b| {
-        confidence_rank(a.severity)
-            .cmp(&confidence_rank(b.severity))
+        confidence_rank(&a.severity)
+            .cmp(&confidence_rank(&b.severity))
             .then_with(|| a.display.to_lowercase().cmp(&b.display.to_lowercase()))
     });
     secrets.sort_by(|a, b| {
-        confidence_rank(a.confidence)
-            .cmp(&confidence_rank(b.confidence))
+        confidence_rank(&a.confidence)
+            .cmp(&confidence_rank(&b.confidence))
             .then_with(|| a.display.to_lowercase().cmp(&b.display.to_lowercase()))
             .then_with(|| a.line_number.cmp(&b.line_number))
     });
     risky.sort_by(|a, b| {
-        confidence_rank(a.severity)
-            .cmp(&confidence_rank(b.severity))
+        confidence_rank(&a.severity)
+            .cmp(&confidence_rank(&b.severity))
             .then_with(|| a.display.to_lowercase().cmp(&b.display.to_lowercase()))
             .then_with(|| a.line_number.cmp(&b.line_number))
     });
@@ -613,23 +715,23 @@ pub fn scan_project_with_options(
     for secret in &secrets {
         findings.push(Finding {
             kind: FindingKind::PotentialSecret,
-            severity: secret.confidence.to_string(),
-            confidence: secret.confidence.to_string(),
+            severity: secret.confidence.clone(),
+            confidence: secret.confidence.clone(),
             file: secret.display.clone(),
             line: Some(secret.line_number),
-            rule: secret.rule.to_string(),
+            rule: secret.rule.clone(),
             message: secret.message.clone(),
         });
     }
     for hit in &risky {
         findings.push(Finding {
             kind: FindingKind::RiskyCode,
-            severity: hit.severity.to_string(),
+            severity: hit.severity.clone(),
             confidence: risky_code::RISKY_CODE_FINDING_CONFIDENCE.to_string(),
             file: hit.display.clone(),
             line: Some(hit.line_number),
-            rule: hit.rule.to_string(),
-            message: hit.explanation.to_string(),
+            rule: hit.rule.clone(),
+            message: hit.explanation.clone(),
         });
     }
 

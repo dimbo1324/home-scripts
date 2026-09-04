@@ -9,6 +9,7 @@
 //! every detector here is a pure, local, in-memory pattern match.
 
 pub mod allow;
+pub mod cache;
 pub mod classify;
 mod constants;
 pub mod error;

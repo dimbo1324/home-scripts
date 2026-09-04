@@ -284,7 +284,14 @@ pub fn run_export(
         // Same race, same resolution as step 1's own comment above:
         // `run_analytics`'s internal `build_export_plan`/`scan_project` calls can
         // hard-error on a cancellation that arrives after this gate already passed.
-        match run_analytics(&paths, config, &plan_outcome.diff_selection, cancel, &log) {
+        match run_analytics(
+            conn,
+            &paths,
+            config,
+            &plan_outcome.diff_selection,
+            cancel,
+            &log,
+        ) {
             Ok(outcome) => analytics_outcome = Some(outcome),
             Err(err) if crate::error::is_cancellation_error(&err) => {
                 log("export cancelled during step 6's own analytics work; step 6 treated as empty");

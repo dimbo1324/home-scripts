@@ -30,15 +30,18 @@ use codepack_diff::DiffSelection;
 use codepack_reports::context::{Inventory, ReportContext};
 use codepack_reports::{ReportJob, RunSummary};
 use codepack_scanner::{ExportIgnoreRules, ExportPlan, ScanOptions, build_export_plan};
+use codepack_security::cache::FileScanCache;
 use codepack_security::{
     Redactor, ScanOptions as SecurityScanOptions, ScanResult, SecurityOptions,
     scan_project_with_options,
 };
+use codepack_storage::Connection;
 
 use codepack_security::should_skip_file_for_safety;
 
 use crate::error::Result;
 use crate::relpath::to_relative_path;
+use crate::scan_cache::SqliteScanCache;
 
 /// Everything later steps (manifest writing, storage, the step-8 dashboard-refresh
 /// hook) need from this step. `inventory`/`replan` are owned copies of this function's
@@ -77,6 +80,7 @@ fn full_job_catalog() -> Vec<ReportJob> {
 /// genuine setup failure (the re-plan itself, or `scan_project` erroring on
 /// cancellation) propagates.
 pub fn run_analytics(
+    conn: &mut Connection,
     paths: &ExportPaths,
     config: &Config,
     diff_selection: &DiffSelection,
@@ -112,6 +116,19 @@ pub fn run_analytics(
 
     let security_options = SecurityOptions::from(config);
     let redactor = Redactor::new(config.redaction_labels);
+    // Loaded before the scan and written back after it: the pass is parallel and a
+    // `Connection` is not `Sync`, so the workers read from memory. A cache failure is
+    // never allowed to fail an export — it is an optimisation, and the scan can always
+    // just do the work.
+    let cache = match SqliteScanCache::load(conn) {
+        Ok(cache) => Some(cache),
+        Err(error) => {
+            log(&format!(
+                "scan cache unavailable, scanning everything: {error}"
+            ));
+            None
+        }
+    };
     let scan_result = scan_project_with_options(
         &paths.project_dir,
         &relative_files,
@@ -123,8 +140,14 @@ pub fn run_analytics(
             // redactor is the plain one and every message is byte for byte what it was.
             redactor: Some(&redactor),
             strict_token_checksums: config.strict_token_checksums,
+            cache: cache.as_ref().map(|cache| cache as &dyn FileScanCache),
         },
     )?;
+    if let Some(cache) = cache
+        && let Err(error) = cache.flush(conn)
+    {
+        log(&format!("scan cache not updated: {error}"));
+    }
 
     // `.codepack-allow` is read from the **source** project, not from the staging copy:
     // it is the user's own reviewed-findings file, and it applies to the bundle the same
@@ -260,7 +283,10 @@ mod tests {
             warning: None,
         };
 
+        let db = tempfile::tempdir().unwrap();
+        let mut conn = codepack_storage::open(&db.path().join("history.db")).unwrap();
         let outcome = run_analytics(
+            &mut conn,
             &paths,
             &config,
             &diff_selection,
@@ -296,7 +322,10 @@ mod tests {
             warning: None,
         };
 
+        let db = tempfile::tempdir().unwrap();
+        let mut conn = codepack_storage::open(&db.path().join("history.db")).unwrap();
         let outcome = run_analytics(
+            &mut conn,
             &paths,
             &config,
             &diff_selection,

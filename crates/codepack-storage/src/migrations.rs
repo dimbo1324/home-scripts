@@ -99,7 +99,30 @@ CREATE TABLE snapshot_file (
 CREATE INDEX idx_snapshot_file_snapshot_relpath ON snapshot_file(snapshot_id, rel_path);
 ";
 
-const MIGRATIONS: &[(i64, &str)] = &[(1, MIGRATION_0001_INITIAL_SCHEMA)];
+/// The content-addressed scan cache.
+///
+/// `key` is opaque here on purpose: `codepack-security` builds it from the file's bytes
+/// together with everything about the running build that decides what those bytes mean,
+/// so this table never has to know what a detector is. `findings_json` is that file's
+/// content-derived findings, already redacted when they were produced (invariant I3) —
+/// nothing in this table holds a secret value.
+///
+/// No foreign key to `project`: identical bytes are identical bytes, and a dependency
+/// shared between two projects is exactly the case worth not scanning twice.
+const MIGRATION_0002_FILE_SCAN_CACHE: &str = r"
+CREATE TABLE file_scan_cache (
+    key           TEXT PRIMARY KEY,
+    findings_json TEXT NOT NULL,
+    created_at    INTEGER NOT NULL,
+    used_at       INTEGER NOT NULL
+);
+CREATE INDEX idx_file_scan_cache_used_at ON file_scan_cache(used_at);
+";
+
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, MIGRATION_0001_INITIAL_SCHEMA),
+    (2, MIGRATION_0002_FILE_SCAN_CACHE),
+];
 
 /// Opens (creating if necessary) the SQLite database at `path`, applies the
 /// connection-level pragmas, and runs every migration that has not yet been recorded
