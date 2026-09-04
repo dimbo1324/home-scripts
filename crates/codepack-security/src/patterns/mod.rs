@@ -1,3 +1,4 @@
+pub mod checksum;
 pub mod code_shape;
 pub mod credentials;
 pub mod entropy;

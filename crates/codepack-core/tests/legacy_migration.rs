@@ -141,6 +141,7 @@ fn json_shape_contains_all_expected_keys_with_expected_types() {
         "watch_enabled",
         "watch_clipboard_auto_update",
         "redaction_labels",
+        "strict_token_checksums",
     ];
     let number_fields = [
         "schema_version",

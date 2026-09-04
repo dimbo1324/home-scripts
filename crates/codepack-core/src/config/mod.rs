@@ -93,6 +93,16 @@ pub struct Config {
     /// assistant actually reads keep the *structure* of the secrets — which occurrences
     /// are the same value — without any of them carrying the value itself.
     pub redaction_labels: bool,
+    /// Let a vendor token whose built-in checksum does not recompute be reported as a
+    /// weaker finding than its shape alone would suggest.
+    ///
+    /// `false` by default, and that default is a safety property rather than caution:
+    /// the checksum recipe is reverse-engineered from a vendor's own tooling, not
+    /// published, so a mistake in it would quietly demote *real* tokens — a recall loss
+    /// in the one detector this product exists for, which invariant I9 forbids trading
+    /// away. On, a documentation sample stops reading as a live credential. See
+    /// `codepack_security::patterns::checksum`.
+    pub strict_token_checksums: bool,
 }
 
 impl Default for Config {
@@ -131,6 +141,7 @@ impl Default for Config {
             ai_handoff_agent: DEFAULT_LOCAL_AI_AGENT.to_string(),
             ai_handoff_question: String::new(),
             redaction_labels: false,
+            strict_token_checksums: false,
         }
     }
 }

@@ -8,6 +8,7 @@
 //! network access or network validation of a secret (invariant I1, permanent):
 //! every detector here is a pure, local, in-memory pattern match.
 
+pub mod allow;
 pub mod classify;
 mod constants;
 pub mod error;
@@ -58,7 +59,7 @@ impl Redactor {
         }
     }
 
-    fn placeholders(&self) -> Placeholders<'_> {
+    pub(crate) fn placeholders(&self) -> Placeholders<'_> {
         match &self.labels {
             Some(labels) => Placeholders::labelled(labels),
             None => Placeholders::plain(),
@@ -105,7 +106,10 @@ pub use policy::{
 };
 pub use pseudonym::REDACTION_PLACEHOLDER_PREFIXES;
 pub use redact::redact_secrets;
-pub use scan::{Finding, FindingKind, ScanResult, ScanSummary, scan_project};
+pub use scan::{
+    Finding, FindingKind, ScanOptions, ScanResult, ScanSummary, result_from_findings, scan_project,
+    scan_project_with_options,
+};
 
 #[cfg(test)]
 mod redactor_tests {

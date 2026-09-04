@@ -1,68 +1,33 @@
-//! Applying `.codepack-allow` to a scan result.
+//! Reading `.codepack-allow` on behalf of a command.
 //!
-//! `codepack-core::allowlist` owns the file format and the fingerprint recipe; this
-//! module owns the one decision that belongs to a front end: what to do with a finding
-//! whose fingerprint is listed.
+//! The screening itself — what a listed fingerprint means, and what a caller is handed
+//! back — lives in `codepack_security::allow`, so the export pipeline and the reports
+//! reach the same verdict this front end does (Q26). What stays here is the one thing
+//! that is a front end's business: turning a malformed-file error into a `CliError` the
+//! command layer can print.
 //!
-//! **A suppressed finding is counted and reported, never silently dropped.** A scanner
-//! that quietly hides things is worse than a noisy one, because a reader cannot tell the
-//! difference between "nothing was found" and "something was found and hidden from you".
-//! Every output path here says how many findings were accepted and by which file.
-//!
-//! The exit code is computed from what survives. That is the entire point of the
-//! feature: a finding a team has reviewed and written down should stop failing their
-//! pipeline. It also means a typo in the file can un-fail a build, which is exactly why
+//! **A suppressed finding is counted and reported, never silently dropped.** The exit
+//! code is computed from what survives, which is the entire point of the feature: a
+//! finding a team has reviewed and written down should stop failing their pipeline. It
+//! also means a typo in the file can un-fail a build, which is exactly why
 //! `codepack-core` rejects a malformed fingerprint at load time instead of letting it
 //! sit there matching nothing.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use codepack_core::allowlist::{self, Allowlist};
-use codepack_security::{Finding, ScanResult};
-use serde::Serialize;
+use codepack_core::allowlist::Allowlist;
 
 use crate::error::{CliError, Result};
 
-/// A finding that was listed in `.codepack-allow`, kept so it can be reported.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct SuppressedFinding {
-    pub fingerprint: String,
-    /// The justification the file itself gives. Echoed back so a reader can judge
-    /// whether the acceptance still holds without opening the file.
-    pub reason: String,
-    pub rule: String,
-    pub file: String,
-    pub severity: String,
-}
-
-/// A scan result after the allowlist has been applied.
-pub(crate) struct Screened {
-    /// Findings that were **not** listed. These drive the report and the exit code.
-    pub findings: Vec<Finding>,
-    pub suppressed: Vec<SuppressedFinding>,
-    /// Where the allowlist was read from, when one was used at all.
-    pub allowlist_path: Option<PathBuf>,
-}
-
-impl Screened {
-    /// Every finding, unfiltered — used when no allowlist exists, which is the common
-    /// case and must not pay for the feature.
-    pub(crate) fn unfiltered(result: &ScanResult) -> Self {
-        Self {
-            findings: result.findings.clone(),
-            suppressed: Vec::new(),
-            allowlist_path: None,
-        }
-    }
-}
+pub(crate) use codepack_security::allow::{Screened, SuppressedFinding, fingerprint_of, screen};
 
 /// Reads `.codepack-allow` from `project_root`, if present.
 ///
-/// A missing file is not an error and yields an empty index. A malformed one is an
-/// error: silently ignoring it would leave a reviewer believing findings are accepted
-/// when they are still being reported, or worse, believing the file is being honoured
-/// when a syntax error means it is not.
+/// A missing file is not an error and yields no index. A malformed one is an error:
+/// silently ignoring it would leave a reviewer believing findings are accepted when they
+/// are still being reported, or worse, believing the file is being honoured when a
+/// syntax error means it is not.
 pub(crate) fn load(project_root: &Path) -> Result<Option<(PathBuf, BTreeMap<String, String>)>> {
     match Allowlist::load(project_root) {
         Ok(None) => Ok(None),
@@ -71,49 +36,10 @@ pub(crate) fn load(project_root: &Path) -> Result<Option<(PathBuf, BTreeMap<Stri
     }
 }
 
-/// Splits `result`'s findings into those that survive and those the allowlist accepts.
-pub(crate) fn screen(
-    result: &ScanResult,
-    allowlist_path: &Path,
-    index: &BTreeMap<String, String>,
-) -> Screened {
-    let mut findings = Vec::new();
-    let mut suppressed = Vec::new();
-
-    for finding in &result.findings {
-        let print = fingerprint_of(finding);
-        match index.get(&print) {
-            Some(reason) => suppressed.push(SuppressedFinding {
-                fingerprint: print,
-                reason: reason.clone(),
-                rule: finding.rule.clone(),
-                file: finding.file.clone(),
-                severity: finding.severity.clone(),
-            }),
-            None => findings.push(finding.clone()),
-        }
-    }
-
-    Screened {
-        findings,
-        suppressed,
-        allowlist_path: Some(allowlist_path.to_path_buf()),
-    }
-}
-
-/// The fingerprint for one finding.
-///
-/// `Finding::message` is already redacted by `codepack-security` before it ever reaches
-/// a front end (invariant I3), so hashing it introduces no exposure that writing the
-/// finding to `06_security_scan.json` does not already accept.
-pub(crate) fn fingerprint_of(finding: &Finding) -> String {
-    allowlist::fingerprint(&finding.rule, &finding.file, &finding.message)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codepack_security::{FindingKind, ScanSummary};
+    use codepack_security::{Finding, FindingKind, ScanResult, ScanSummary};
 
     fn finding(rule: &str, file: &str, message: &str, severity: &str) -> Finding {
         Finding {

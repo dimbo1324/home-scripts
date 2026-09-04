@@ -30,7 +30,10 @@ use codepack_diff::DiffSelection;
 use codepack_reports::context::{Inventory, ReportContext};
 use codepack_reports::{ReportJob, RunSummary};
 use codepack_scanner::{ExportIgnoreRules, ExportPlan, ScanOptions, build_export_plan};
-use codepack_security::{ScanResult, SecurityOptions, scan_project};
+use codepack_security::{
+    Redactor, ScanOptions as SecurityScanOptions, ScanResult, SecurityOptions,
+    scan_project_with_options,
+};
 
 use codepack_security::should_skip_file_for_safety;
 
@@ -108,12 +111,39 @@ pub fn run_analytics(
         .collect();
 
     let security_options = SecurityOptions::from(config);
-    let scan_result = scan_project(
+    let redactor = Redactor::new(config.redaction_labels);
+    let scan_result = scan_project_with_options(
         &paths.project_dir,
         &relative_files,
         security_options.max_bytes_per_file,
         cancel,
+        &SecurityScanOptions {
+            // Labels reach the scanner's own artifacts too, not only the text dump and
+            // the git reports (Q34). With `redaction_labels` off — the default — this
+            // redactor is the plain one and every message is byte for byte what it was.
+            redactor: Some(&redactor),
+            strict_token_checksums: config.strict_token_checksums,
+        },
     )?;
+
+    // `.codepack-allow` is read from the **source** project, not from the staging copy:
+    // it is the user's own reviewed-findings file, and it applies to the bundle the same
+    // way it applies to `scan` and `verify` (Q26). A missing file leaves everything
+    // untouched, so a project without one pays nothing for this.
+    let screened = codepack_security::allow::screen_project(&paths.source_root, &scan_result)?;
+    if screened.has_suppressions() {
+        // Never silently dropped: the run log says how many and by whose authority.
+        log(&format!(
+            "security scan: {} finding(s) accepted by {}",
+            screened.suppressed.len(),
+            screened
+                .allowlist_path
+                .as_deref()
+                .unwrap_or_else(|| Path::new(codepack_core::ALLOWLIST_FILE_NAME))
+                .display()
+        ));
+    }
+    let scan_result = screened.to_result();
 
     let inventory = Inventory::from_plan(&replan);
     let profile = config.normalized_export_profile();

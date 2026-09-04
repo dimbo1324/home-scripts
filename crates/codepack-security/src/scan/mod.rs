@@ -12,13 +12,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use codepack_core::CancellationToken;
+use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::classify;
 use crate::constants;
 use crate::error::{Result, SecurityError};
 use crate::patterns::{
-    confidence_rank, credentials, entropy, keyword, prefilter, provider, risky_code,
+    checksum, confidence_rank, credentials, entropy, keyword, prefilter, provider, risky_code,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -57,6 +58,51 @@ pub struct ScanSummary {
 pub struct ScanResult {
     pub summary: ScanSummary,
     pub findings: Vec<Finding>,
+}
+
+/// Rebuilds a result from a subset of its findings, recounting the summary by kind so
+/// it describes what is actually there.
+///
+/// Used after the allowlist removes accepted findings: a summary left saying "3 secrets"
+/// over a list of one is the kind of quiet inconsistency that makes a report untrusted.
+pub fn result_from_findings(findings: Vec<Finding>) -> ScanResult {
+    let mut summary = ScanSummary::default();
+    for finding in &findings {
+        match finding.kind {
+            FindingKind::SensitiveFile => summary.sensitive_files += 1,
+            FindingKind::PotentialSecret => summary.potential_secrets += 1,
+            FindingKind::RiskyCode => summary.risky_code += 1,
+        }
+    }
+    summary.total_findings = findings.len();
+    ScanResult { summary, findings }
+}
+
+/// What a caller may vary about a scan. Everything defaults to the behaviour every
+/// release so far produced, so [`scan_project`] and
+/// [`scan_project_with_options`] with a default value are the same run.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScanOptions<'a> {
+    /// Redactor used to build every finding message.
+    ///
+    /// `None` is the plain, indistinguishable placeholder. A labelled redactor makes
+    /// `<REDACTED:s1>` reach `06_security_scan.json`, SARIF and the text report, so a
+    /// reader can tell whether two findings are one credential or two — the gap Q34
+    /// named, where labels reached the text dump and the git reports but stopped at the
+    /// scanner's own artifacts.
+    ///
+    /// The artifact *shape* is unchanged either way: no field is added, removed or
+    /// retyped, only the vocabulary inside `message`, and only when the caller opts in.
+    /// That is deliberate — `06_security_scan.json`'s `schema_version` is matched
+    /// against the archived legacy implementation by the golden references, so a bump
+    /// here could never be satisfied by regenerating them.
+    pub redactor: Option<&'a crate::Redactor>,
+    /// Let a failed vendor checksum weaken a provider finding.
+    ///
+    /// Off unless asked for, because the recipe is reverse-engineered rather than
+    /// published — see [`crate::patterns::checksum`] for why an unverifiable algorithm
+    /// may not be allowed to demote a real token.
+    pub strict_token_checksums: bool,
 }
 
 fn file_name_lower(path: &Path) -> String {
@@ -115,6 +161,33 @@ struct SecretHit {
     confidence: &'static str,
 }
 
+/// The confidence a provider match is reported at.
+///
+/// Normally the rule's own, unchanged. In strict mode a token whose vendor checksum
+/// recomputes to something else is reported at `medium`: still a finding, still naming
+/// the vendor, but no longer strong enough to trip a `--fail-on critical` gate. That is
+/// the whole precision gain — a documentation sample such as
+/// `ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` stops reading as a live credential.
+///
+/// A verdict of `Unknown` never weakens anything: it means this build cannot check that
+/// vendor's format, which is not evidence about the token.
+fn provider_confidence(
+    line: &str,
+    found: &provider::ProviderMatch,
+    strict_checksums: bool,
+) -> &'static str {
+    if !strict_checksums {
+        return found.confidence;
+    }
+    // `find_provider_matches` reports byte offsets into this same line, and the shapes
+    // it matches are ASCII, so the slice is always on a character boundary.
+    let token = &line[found.start..found.end];
+    match checksum::verdict_for(found.rule_id, token) {
+        checksum::ChecksumVerdict::Invalid => "medium",
+        checksum::ChecksumVerdict::Valid | checksum::ChecksumVerdict::Unknown => found.confidence,
+    }
+}
+
 /// Runs every secret detector over one line and applies the self-protection exemption
 /// once, uniformly, across all of them (keyword, provider, entropy) — not only the
 /// keyword cascade, which is the minimum legacy required.
@@ -152,7 +225,11 @@ struct SecretHit {
 ///
 /// The redaction applied to the surviving hit's message is unaffected by this choice —
 /// [`redacted_message`] masks every detected span regardless of which hit is reported.
-fn collect_secret_hits(line: &str) -> Vec<SecretHit> {
+/// `strict_checksums` lets a provider match whose vendor checksum fails to recompute be
+/// reported as a weaker finding instead of a definitive one. It is a caller's opt-in,
+/// never the default — see [`crate::patterns::checksum`] for why an unverified recipe is
+/// not allowed to demote a real token on its own.
+fn collect_secret_hits(line: &str, strict_checksums: bool) -> Vec<SecretHit> {
     if keyword::is_self_protected(line) {
         return Vec::new();
     }
@@ -178,7 +255,7 @@ fn collect_secret_hits(line: &str) -> Vec<SecretHit> {
     if prefiltered && let Some(found) = provider::find_provider_matches(line).into_iter().next() {
         return vec![SecretHit {
             rule: found.rule_id,
-            confidence: found.confidence,
+            confidence: provider_confidence(line, &found, strict_checksums),
         }];
     }
     // Never gated by the prefilter — see patterns::prefilter's documented scope limits.
@@ -243,7 +320,10 @@ fn collect_secret_hits(line: &str) -> Vec<SecretHit> {
 /// `JWT_SECRET=<value>` is one single token, and masking that span wipes the key name
 /// the finding exists to identify — leaving a useless `- <REDACTED>`. It equally erases
 /// the keyword text `redacted_line` needs to recognise the line as secret-shaped at all.
-fn mask_non_keyword_secret_spans(line: &str) -> std::borrow::Cow<'_, str> {
+fn mask_non_keyword_secret_spans<'a>(
+    line: &'a str,
+    redactor: Option<&crate::Redactor>,
+) -> std::borrow::Cow<'a, str> {
     let mut spans: Vec<(usize, usize)> = Vec::new();
     if prefilter::has_hit(line) {
         for found in provider::find_provider_matches(line) {
@@ -276,7 +356,17 @@ fn mask_non_keyword_secret_spans(line: &str) -> std::borrow::Cow<'_, str> {
             continue;
         }
         out.push_str(&line[cursor..start]);
-        out.push_str("<REDACTED>");
+        // A labelling redactor spells this span `<REDACTED_SECRET:sN>` — the "bare"
+        // shape, since a provider signature or entropy match has no key of its own.
+        // Every other case keeps the literal this function has always written: a plain
+        // `Redactor` must produce byte-identical output to no redactor at all, or the
+        // default run moves.
+        match redactor {
+            Some(redactor) if redactor.is_labelled() => {
+                out.push_str(&redactor.placeholders().bare(&line[start..end]));
+            }
+            _ => out.push_str("<REDACTED>"),
+        }
         cursor = end;
     }
     out.push_str(&line[cursor..]);
@@ -298,9 +388,12 @@ fn mask_non_keyword_secret_spans(line: &str) -> std::borrow::Cow<'_, str> {
 ///    message exactly as legacy does. This is a deliberate strengthening over legacy in
 ///    favour of invariant I3, and the only respect in which this message can differ from
 ///    legacy's.
-fn redacted_message(line: &str) -> String {
-    let legacy = keyword::redacted_line(line);
-    mask_non_keyword_secret_spans(&legacy).into_owned()
+fn redacted_message(line: &str, redactor: Option<&crate::Redactor>) -> String {
+    let legacy = match redactor {
+        Some(redactor) => redactor.redacted_line(line),
+        None => keyword::redacted_line(line),
+    };
+    mask_non_keyword_secret_spans(&legacy, redactor).into_owned()
 }
 
 struct RiskyHit {
@@ -342,6 +435,84 @@ struct RiskyRecord {
     explanation: &'static str,
 }
 
+/// Everything one file contributes, kept together so the parallel pass can hand back a
+/// single value per file and the caller can flatten the results in input order.
+#[derive(Default)]
+struct FileScanRecords {
+    files: Vec<FileRecord>,
+    secrets: Vec<SecretRecord>,
+    risky: Vec<RiskyRecord>,
+}
+
+/// The body of what used to be `scan_project`'s per-file loop iteration, unchanged in
+/// behaviour: a sensitive filename is recorded even for a file whose contents are not
+/// read, and every early exit that used to `continue` now returns what has been
+/// collected so far.
+fn scan_one_file(
+    root: &Path,
+    relative: &Path,
+    max_bytes_per_file: Option<u64>,
+    options: &ScanOptions<'_>,
+) -> Result<FileScanRecords> {
+    let mut records = FileScanRecords::default();
+
+    if let Some(severity) = sensitive_file_severity(relative) {
+        records.files.push(FileRecord {
+            severity,
+            display: paths::rel_display(relative),
+        });
+    }
+
+    if !classify::should_consider_text_file(relative) {
+        return Ok(records);
+    }
+    let absolute = root.join(relative);
+    let metadata = match fs::metadata(&absolute) {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(records),
+    };
+    if let Some(max) = max_bytes_per_file
+        && metadata.len() > max
+    {
+        return Ok(records);
+    }
+    let Some(text) = read_text_for_scan(&absolute)? else {
+        return Ok(records);
+    };
+    let display = paths::rel_display(relative);
+
+    for (idx, line) in text.lines().enumerate() {
+        let line_number = idx + 1;
+        let secret_hits = collect_secret_hits(line, options.strict_token_checksums);
+        if !secret_hits.is_empty() {
+            // Computed once per line, shared by every hit on it (see
+            // `mask_non_keyword_secret_spans`'s doc comment for why this must not
+            // be scoped to only the current hit's own span).
+            let message = redacted_message(line, options.redactor);
+            for hit in secret_hits {
+                records.secrets.push(SecretRecord {
+                    confidence: hit.confidence,
+                    display: display.clone(),
+                    line_number,
+                    rule: hit.rule,
+                    message: message.clone(),
+                });
+            }
+        }
+        for hit in collect_risky_hits(line) {
+            records.risky.push(RiskyRecord {
+                severity: hit.severity,
+                display: display.clone(),
+                line_number,
+                rule: hit.rule,
+                explanation: hit.explanation,
+            });
+        }
+    }
+
+    Ok(records)
+}
+
 /// Scans a caller-supplied list of files (relative to `root`) for sensitive filenames,
 /// secret-like lines (keyword cascade + provider signatures + entropy), and risky code
 /// patterns. `max_bytes_per_file`, when set, skips reading files above that size —
@@ -351,73 +522,62 @@ struct RiskyRecord {
 /// checking cancellation *inside* the loop, not only between pipeline steps; per-file
 /// is this loop's natural granularity, matching `codepack-scanner::walk_project`'s
 /// per-entry checks from S2).
+///
+/// ## Why the parallelism cannot change a single byte of the output
+///
+/// Files are scanned in parallel, but their records are collected **in input order**
+/// (`par_iter` is indexed, so `collect` restores the order) and only then flattened.
+/// That matters because the three sorts below are stable and their keys are not unique:
+/// two secret hits on the same file and line with the same confidence, or two paths
+/// differing only in case, tie — and a tie is resolved by insertion order. Producing the
+/// records in a different order would silently reorder findings in
+/// `06_security_scan.json`, SARIF and the golden references (invariant I5).
+///
+/// Errors are selected the same way: the per-file results are collected as
+/// `Vec<Result<_>>` and the **first** error in input order is returned, rather than
+/// whichever thread happened to fail first.
 pub fn scan_project(
     root: &Path,
     relative_files: &[PathBuf],
     max_bytes_per_file: Option<u64>,
     cancel: &CancellationToken,
 ) -> Result<ScanResult> {
+    scan_project_with_options(
+        root,
+        relative_files,
+        max_bytes_per_file,
+        cancel,
+        &ScanOptions::default(),
+    )
+}
+
+/// [`scan_project`] with the knobs in [`ScanOptions`]. The four-argument form is kept as
+/// the name every caller already uses, and is exactly this function with defaults.
+pub fn scan_project_with_options(
+    root: &Path,
+    relative_files: &[PathBuf],
+    max_bytes_per_file: Option<u64>,
+    cancel: &CancellationToken,
+    options: &ScanOptions<'_>,
+) -> Result<ScanResult> {
+    let per_file: Vec<Result<FileScanRecords>> = relative_files
+        .par_iter()
+        .map(|relative| {
+            if cancel.is_cancelled() {
+                return Err(SecurityError::Cancelled);
+            }
+            scan_one_file(root, relative, max_bytes_per_file, options)
+        })
+        .collect();
+
     let mut files: Vec<FileRecord> = Vec::new();
     let mut secrets: Vec<SecretRecord> = Vec::new();
     let mut risky: Vec<RiskyRecord> = Vec::new();
-
-    for relative in relative_files {
-        if cancel.is_cancelled() {
-            return Err(SecurityError::Cancelled);
-        }
-        if let Some(severity) = sensitive_file_severity(relative) {
-            files.push(FileRecord {
-                severity,
-                display: paths::rel_display(relative),
-            });
-        }
-
-        if !classify::should_consider_text_file(relative) {
-            continue;
-        }
-        let absolute = root.join(relative);
-        let metadata = match fs::metadata(&absolute) {
-            Ok(metadata) => metadata,
-            Err(_) => continue,
-        };
-        if let Some(max) = max_bytes_per_file
-            && metadata.len() > max
-        {
-            continue;
-        }
-        let Some(text) = read_text_for_scan(&absolute)? else {
-            continue;
-        };
-        let display = paths::rel_display(relative);
-
-        for (idx, line) in text.lines().enumerate() {
-            let line_number = idx + 1;
-            let secret_hits = collect_secret_hits(line);
-            if !secret_hits.is_empty() {
-                // Computed once per line, shared by every hit on it (see
-                // `mask_non_keyword_secret_spans`'s doc comment for why this must not
-                // be scoped to only the current hit's own span).
-                let message = redacted_message(line);
-                for hit in secret_hits {
-                    secrets.push(SecretRecord {
-                        confidence: hit.confidence,
-                        display: display.clone(),
-                        line_number,
-                        rule: hit.rule,
-                        message: message.clone(),
-                    });
-                }
-            }
-            for hit in collect_risky_hits(line) {
-                risky.push(RiskyRecord {
-                    severity: hit.severity,
-                    display: display.clone(),
-                    line_number,
-                    rule: hit.rule,
-                    explanation: hit.explanation,
-                });
-            }
-        }
+    for record in per_file {
+        let record = record?;
+        files.extend(record.files);
+        secrets.extend(record.secrets);
+        risky.extend(record.risky);
     }
 
     files.sort_by(|a, b| {

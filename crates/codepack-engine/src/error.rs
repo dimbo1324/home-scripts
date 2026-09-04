@@ -22,6 +22,9 @@ pub enum EngineError {
     #[error(transparent)]
     Archive(#[from] codepack_archive::ArchiveError),
 
+    #[error(transparent)]
+    Allowlist(#[from] codepack_core::AllowlistError),
+
     #[error("cannot create directory {path}: {source}")]
     Io {
         path: PathBuf,

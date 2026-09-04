@@ -117,6 +117,9 @@ pub struct ProjectConfig {
     /// it changes what every bundle produced from this repository looks like, and the
     /// people reading those bundles have to agree on what `<REDACTED:s1>` means.
     pub redaction_labels: Option<bool>,
+    /// Whether a failed vendor checksum weakens a provider finding. A team decision:
+    /// it changes what this repository's pipeline will and will not fail on.
+    pub strict_token_checksums: Option<bool>,
 }
 
 impl ProjectConfig {
@@ -179,6 +182,7 @@ impl ProjectConfig {
             always_include_dirs,
             developer_context,
             redaction_labels,
+            strict_token_checksums,
         );
     }
 }
