@@ -683,8 +683,8 @@ pub fn scan_project_with_options(
     }
 
     files.sort_by(|a, b| {
-        confidence_rank(&a.severity)
-            .cmp(&confidence_rank(&b.severity))
+        confidence_rank(a.severity)
+            .cmp(&confidence_rank(b.severity))
             .then_with(|| a.display.to_lowercase().cmp(&b.display.to_lowercase()))
     });
     secrets.sort_by(|a, b| {

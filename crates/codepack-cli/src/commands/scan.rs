@@ -212,8 +212,22 @@ pub(crate) fn build(
     fail_on: SeverityArg,
     baseline_options: BaselineOptions<'_>,
 ) -> Result<ScanReport> {
-    let cancel = CancellationToken::new();
+    build_with_cancel(
+        context,
+        fail_on,
+        baseline_options,
+        &CancellationToken::new(),
+    )
+}
 
+/// [`build`] with a token the caller can trip, for a client that can ask a running scan
+/// to stop.
+pub(crate) fn build_with_cancel(
+    context: &ProjectContext,
+    fail_on: SeverityArg,
+    baseline_options: BaselineOptions<'_>,
+    cancel: &CancellationToken,
+) -> Result<ScanReport> {
     // Scanned with safe mode forced to `full`, meaning "exclude nothing on safety
     // grounds" — so the scan sees every file the ignore rules include, including the
     // ones an export would drop.
@@ -250,7 +264,7 @@ pub(crate) fn build(
         &scan_config,
         &std::collections::HashMap::new(),
         None,
-        &cancel,
+        cancel,
     )?;
     let relative_files: Vec<std::path::PathBuf> = plan
         .export_plan
@@ -264,7 +278,7 @@ pub(crate) fn build(
         &context.root,
         &relative_files,
         options.max_bytes_per_file,
-        &cancel,
+        cancel,
     )?;
 
     let (screened, baseline) = screen_all(&context.root, baseline_options, &result)?;
@@ -287,7 +301,16 @@ pub(crate) fn build(
 /// fingerprint has to be stable and has to name something a person recognises, and a
 /// path containing a blob id is neither.
 pub(crate) fn build_history(context: &ProjectContext, args: &ScanArgs) -> Result<ScanReport> {
-    let cancel = CancellationToken::new();
+    build_history_with_cancel(context, args, &CancellationToken::new())
+}
+
+/// [`build_history`] with a token the caller can trip. A history walk is the longest
+/// thing this command does, so it is the one most worth being able to stop.
+pub(crate) fn build_history_with_cancel(
+    context: &ProjectContext,
+    args: &ScanArgs,
+    cancel: &CancellationToken,
+) -> Result<ScanReport> {
     let options = crate::history_scan::HistoryOptions {
         since: args.since.clone(),
         max_commits: args
@@ -308,7 +331,7 @@ pub(crate) fn build_history(context: &ProjectContext, args: &ScanArgs) -> Result
             history.root(),
             &relative_files,
             scan_options.max_bytes_per_file,
-            &cancel,
+            cancel,
         )?
     };
 
@@ -416,7 +439,21 @@ pub(crate) fn build_staged(
     fail_on: SeverityArg,
     baseline_options: BaselineOptions<'_>,
 ) -> Result<ScanReport> {
-    let cancel = CancellationToken::new();
+    build_staged_with_cancel(
+        context,
+        fail_on,
+        baseline_options,
+        &CancellationToken::new(),
+    )
+}
+
+/// [`build_staged`] with a token the caller can trip.
+pub(crate) fn build_staged_with_cancel(
+    context: &ProjectContext,
+    fail_on: SeverityArg,
+    baseline_options: BaselineOptions<'_>,
+    cancel: &CancellationToken,
+) -> Result<ScanReport> {
     let staged = crate::staged::collect(&context.root)?;
 
     let result = if staged.is_empty() {
@@ -430,7 +467,7 @@ pub(crate) fn build_staged(
             staged.root(),
             staged.relative_files(),
             options.max_bytes_per_file,
-            &cancel,
+            cancel,
         )?
     };
 

@@ -19,6 +19,7 @@
 
 use std::path::PathBuf;
 
+use codepack_core::CancellationToken;
 use serde_json::{Value, json};
 
 use crate::cli::{ProjectArgs, ScanArgs, SeverityArg};
@@ -215,11 +216,25 @@ fn into_outcome<T: serde::Serialize>(report: &T) -> ToolOutcome {
 
 /// Runs one tool. Never returns `Err` for a tool's own failure — see the module doc.
 pub(crate) fn call(name: &str, arguments: &Value) -> ToolOutcome {
+    call_with_cancel(name, arguments, &CancellationToken::new())
+}
+
+/// [`call`] with a token the loop can trip when the client sends
+/// `notifications/cancelled` for this call.
+///
+/// Only the two long tools take it. `preview` and `explain` plan a tree and answer;
+/// they finish in the time it takes to walk it, and wiring a token through them would
+/// buy a client nothing it could act on.
+pub(crate) fn call_with_cancel(
+    name: &str,
+    arguments: &Value,
+    cancel: &CancellationToken,
+) -> ToolOutcome {
     match name {
         "codepack_preview" => preview(arguments),
-        "codepack_scan" => scan(arguments),
+        "codepack_scan" => scan(arguments, cancel),
         "codepack_explain" => explain(arguments),
-        "codepack_export" => export(arguments),
+        "codepack_export" => export(arguments, cancel),
         other => ToolOutcome::error(format!(
             "unknown tool {other:?}. Available: {}",
             catalogue()
@@ -323,7 +338,7 @@ fn cap_file_list(value: &mut Value) {
     }
 }
 
-fn scan(arguments: &Value) -> ToolOutcome {
+fn scan(arguments: &Value, cancel: &CancellationToken) -> ToolOutcome {
     let context = match context_of(arguments) {
         Ok(context) => context,
         Err(outcome) => return outcome,
@@ -333,15 +348,17 @@ fn scan(arguments: &Value) -> ToolOutcome {
     let built = match mode {
         // No baseline from here: an agent asking "is there a secret in this project"
         // wants every answer, not the ones a file says are old news.
-        "working_tree" => commands::scan::build(
+        "working_tree" => commands::scan::build_with_cancel(
             &context,
             SeverityArg::Critical,
             commands::scan::BaselineOptions::default(),
+            cancel,
         ),
-        "staged" => commands::scan::build_staged(
+        "staged" => commands::scan::build_staged_with_cancel(
             &context,
             SeverityArg::Critical,
             commands::scan::BaselineOptions::default(),
+            cancel,
         ),
         "history" => {
             let args = ScanArgs {
@@ -358,7 +375,7 @@ fn scan(arguments: &Value) -> ToolOutcome {
                 sarif: None,
                 fail_on: SeverityArg::Critical,
             };
-            commands::scan::build_history(&context, &args)
+            commands::scan::build_history_with_cancel(&context, &args, cancel)
         }
         other => {
             return ToolOutcome::error(format!(
@@ -388,7 +405,7 @@ fn explain(arguments: &Value) -> ToolOutcome {
     }
 }
 
-fn export(arguments: &Value) -> ToolOutcome {
+fn export(arguments: &Value, cancel: &CancellationToken) -> ToolOutcome {
     let Some(out_dir) = string_argument(arguments, "out_dir") else {
         return ToolOutcome::error(
             "export needs an `out_dir` to write into. It is required rather than \
@@ -404,8 +421,19 @@ fn export(arguments: &Value) -> ToolOutcome {
     // Quiet: progress would otherwise be printed, and although it goes to stderr and
     // could not corrupt the protocol, a tool call is not a place a user is watching a
     // log scroll past.
-    match commands::export::build(&context, Some(std::path::Path::new(out_dir)), true) {
-        Ok(report) => into_outcome(&report),
+    match commands::export::build_with_cancel(
+        &context,
+        Some(std::path::Path::new(out_dir)),
+        true,
+        cancel,
+    ) {
+        Ok(report) => {
+            // The bundle's own reports become readable over the same pipe, so an agent
+            // that just produced thirty analyses does not have to leave the protocol to
+            // look at one.
+            super::resources::register_bundle(std::path::Path::new(&report.staging_dir));
+            into_outcome(&report)
+        }
         Err(error) => ToolOutcome::error(error.to_string()),
     }
 }

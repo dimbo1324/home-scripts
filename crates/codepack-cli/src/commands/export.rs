@@ -75,6 +75,20 @@ pub(crate) fn build(
     out: Option<&std::path::Path>,
     quiet: bool,
 ) -> Result<ExportReport> {
+    build_with_cancel(context, out, quiet, &CancellationToken::new())
+}
+
+/// [`build`] with a token the caller can trip.
+///
+/// The pipeline already checks cancellation inside each step's loops; this is the wire
+/// that lets something outside this process reach it — today, an MCP client sending
+/// `notifications/cancelled` while an export is running.
+pub(crate) fn build_with_cancel(
+    context: &ProjectContext,
+    out: Option<&std::path::Path>,
+    quiet: bool,
+    cancel: &CancellationToken,
+) -> Result<ExportReport> {
     let output_root = resolve_output_root(out, &context.root)?;
 
     let mut conn = commands::open_history_db()?;
@@ -104,7 +118,7 @@ pub(crate) fn build(
         &context.config,
         &HashMap::new(),
         &progress,
-        &CancellationToken::new(),
+        cancel,
     );
 
     // Dropping the sender ends the printer's loop; do it before unwrapping the result

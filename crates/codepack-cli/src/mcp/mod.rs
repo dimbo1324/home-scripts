@@ -39,6 +39,7 @@
 //! go to stderr. This is why the export tool runs quiet.
 
 mod protocol;
+mod resources;
 mod tools;
 
 use std::io::{BufRead, Write};
@@ -59,11 +60,13 @@ use crate::exit::Outcome;
 /// exit and not an error. A server that treated it as one would make every clean
 /// disconnect look like a crash in the client's logs.
 pub(crate) fn run() -> Result<Outcome> {
-    let stdin = std::io::stdin();
+    // A `BufReader` over `Stdin` rather than `stdin().lock()`: the reader runs on its
+    // own thread now, and a `StdinLock` holds a mutex guard that cannot cross one.
+    let mut stdin = std::io::BufReader::new(std::io::stdin());
     let mut stdout = std::io::stdout();
     // A broken pipe is how a client that has stopped listening looks from here, and it
     // is a normal end of session rather than a failure to report to nobody.
-    match serve(&mut stdin.lock(), &mut stdout) {
+    match serve(&mut stdin, &mut stdout) {
         Ok(()) => Ok(Outcome::Success),
         Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(Outcome::Success),
         Err(error) => Err(crate::error::CliError::message(format!(
@@ -74,27 +77,237 @@ pub(crate) fn run() -> Result<Outcome> {
 
 /// The read/dispatch/write loop, over any pair of streams so it can be driven by a test
 /// without a process.
-fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> std::io::Result<()> {
-    let mut line = String::new();
-    loop {
-        line.clear();
-        if input.read_line(&mut line)? == 0 {
-            return Ok(());
+///
+/// ## Why there is a second thread
+///
+/// A tool call used to hold this loop, which meant `notifications/cancelled` could not
+/// be seen until the call it wanted to cancel had already finished. Input is therefore
+/// read by its own thread and handed over a channel, so the loop can watch for that
+/// notification *while* a call runs.
+///
+/// Still one request at a time. Anything else arriving mid-call is queued and answered
+/// in order afterwards, exactly as it would have been before — the change buys
+/// cancellation, not concurrency, and pretending otherwise would mean two exports
+/// writing into one staging directory.
+fn serve(input: &mut (dyn BufRead + Send), output: &mut dyn Write) -> std::io::Result<()> {
+    std::thread::scope(|scope| {
+        let (sender, receiver) = std::sync::mpsc::channel::<std::io::Result<String>>();
+        scope.spawn(move || {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match input.read_line(&mut line) {
+                    // End of input: the client closed the pipe, which is a normal
+                    // shutdown. Dropping the sender is what tells the loop.
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if sender.send(Ok(line.clone())).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send(Err(error));
+                        break;
+                    }
+                }
+            }
+        });
+        session(&mut Incoming::new(&receiver), output)
+    })
+}
+
+/// Lines waiting to be handled: from the reader thread, and from mid-call arrivals.
+struct Incoming<'a> {
+    lines: &'a std::sync::mpsc::Receiver<std::io::Result<String>>,
+    /// Read while a tool call was running, to be handled in arrival order once it ends.
+    queued: std::collections::VecDeque<String>,
+    /// The reader thread has stopped: end of input, or the error below.
+    closed: bool,
+    /// A read failure, reported once the current call has been answered. Answering
+    /// first matters — the client is blocked on that response, and dropping it to
+    /// report an error nobody is reading would be the worse of the two.
+    error: Option<std::io::Error>,
+}
+
+impl<'a> Incoming<'a> {
+    fn new(lines: &'a std::sync::mpsc::Receiver<std::io::Result<String>>) -> Self {
+        Self {
+            lines,
+            queued: std::collections::VecDeque::new(),
+            closed: false,
+            error: None,
         }
-        let trimmed = line.trim();
+    }
+
+    fn absorb(&mut self, message: std::io::Result<String>) {
+        match message {
+            Ok(line) => self.queued.push_back(line),
+            Err(error) => {
+                self.error = Some(error);
+                self.closed = true;
+            }
+        }
+    }
+
+    /// The next line, waiting for one if necessary. `None` ends the session.
+    fn next_line(&mut self) -> Option<String> {
+        if let Some(line) = self.queued.pop_front() {
+            return Some(line);
+        }
+        if self.closed {
+            return None;
+        }
+        match self.lines.recv() {
+            Ok(message) => {
+                self.absorb(message);
+                self.queued.pop_front()
+            }
+            Err(_) => {
+                self.closed = true;
+                None
+            }
+        }
+    }
+
+    /// Whatever has arrived, without waiting long. For use while a call is running.
+    fn poll(&mut self) -> Option<String> {
+        if self.closed {
+            return None;
+        }
+        match self
+            .lines
+            .recv_timeout(std::time::Duration::from_millis(25))
+        {
+            Ok(message) => {
+                self.absorb(message);
+                self.queued.pop_back()
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                self.closed = true;
+                None
+            }
+        }
+    }
+}
+
+fn session(incoming: &mut Incoming<'_>, output: &mut dyn Write) -> std::io::Result<()> {
+    while let Some(line) = incoming.next_line() {
+        let trimmed = line.trim().to_string();
         // Blank lines between messages are not a protocol error; ignoring them costs
         // nothing and refusing them would break a client that pads its output.
         if trimmed.is_empty() {
             continue;
         }
 
-        if let Some(response) = handle_line(trimmed) {
+        let response = match pending_tool_call(&trimmed) {
+            Some(call) => Some(run_tool_call(call, incoming)),
+            None => handle_line(&trimmed),
+        };
+
+        if let Some(response) = response {
             output.write_all(response.to_line().as_bytes())?;
             // Flushed per message: a client is blocked waiting for this answer, and a
             // buffered response is indistinguishable from a hung server.
             output.flush()?;
         }
     }
+    match incoming.error.take() {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// A `tools/call` request this loop should run on a worker thread.
+struct ToolCall {
+    id: Value,
+    name: String,
+    arguments: Value,
+}
+
+/// Recognises a well-formed `tools/call`, and nothing else.
+///
+/// A malformed one falls through to [`handle_line`], which already knows how to say what
+/// is wrong with it. This function's only job is deciding what needs a worker thread.
+fn pending_tool_call(line: &str) -> Option<ToolCall> {
+    let request: Request = serde_json::from_str(line).ok()?;
+    if !request.is_valid_envelope() || request.is_notification() || request.method != "tools/call" {
+        return None;
+    }
+    let params = request.params.as_ref()?;
+    let name = params.get("name").and_then(Value::as_str)?.to_string();
+    Some(ToolCall {
+        id: request.id.clone().unwrap_or(Value::Null),
+        name,
+        arguments: params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+    })
+}
+
+/// Runs one tool call while staying able to hear the client.
+///
+/// Everything arriving meanwhile is queued, except a cancellation naming *this* request,
+/// which trips the token the tool is holding. A cancelled tool still answers: the
+/// pipeline returns what it managed to do and says it was cancelled, which is more use
+/// to a client than silence and is what the contract already promises.
+fn run_tool_call(call: ToolCall, incoming: &mut Incoming<'_>) -> Response {
+    let cancel = codepack_core::CancellationToken::new();
+    let name = call.name.clone();
+    let arguments = call.arguments.clone();
+    let worker = {
+        let cancel = cancel.clone();
+        std::thread::spawn(move || tools::call_with_cancel(&name, &arguments, &cancel))
+    };
+
+    while !worker.is_finished() {
+        match incoming.poll() {
+            Some(line) if cancels(&line, &call.id) => cancel.cancel(),
+            Some(line) => incoming.queued.push_back(line),
+            // Nothing arrived. When input is still open the poll already waited; once it
+            // has closed there is nothing left to wait on, so wait deliberately rather
+            // than spinning a core until the worker finishes.
+            None => {
+                if incoming.closed {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+        }
+    }
+
+    let result = match worker.join() {
+        Ok(outcome) => outcome_to_result(outcome),
+        // A panicking tool is a defect in this binary, not a protocol fault, so it comes
+        // back the way any other tool failure does: a successful result carrying a
+        // message the model can read.
+        Err(_) => json!({
+            "content": [{
+                "type": "text",
+                "text": "the tool panicked; this is a bug in codepack, not in the request"
+            }],
+            "isError": true
+        }),
+    };
+    Response::success(call.id, result)
+}
+
+/// Whether `line` is `notifications/cancelled` naming `id`.
+///
+/// A cancellation for some other request is not this call's business and is queued like
+/// anything else; acting on it here would stop work the client still wants.
+fn cancels(line: &str, id: &Value) -> bool {
+    let Ok(request) = serde_json::from_str::<Request>(line) else {
+        return false;
+    };
+    if request.method != "notifications/cancelled" {
+        return false;
+    }
+    request
+        .params
+        .as_ref()
+        .and_then(|params| params.get("requestId"))
+        .is_some_and(|requested| requested == id)
 }
 
 /// One incoming line to at most one outgoing response. `None` means silence is the
@@ -136,6 +349,11 @@ fn handle_line(line: &str) -> Option<Response> {
         "initialize" => Response::success(id, initialize_result()),
         "ping" => Response::success(id, json!({})),
         "tools/list" => Response::success(id, json!({"tools": tools::catalogue()})),
+        "resources/list" => Response::success(id, json!({"resources": resources::list()})),
+        "resources/read" => match read_resource(request.params.as_ref()) {
+            Ok(result) => Response::success(id, result),
+            Err(message) => Response::failure(id, INVALID_PARAMS, message),
+        },
         "tools/call" => match call_result(request.params.as_ref()) {
             Ok(result) => Response::success(id, result),
             Err(message) => Response::failure(id, INVALID_PARAMS, message),
@@ -148,20 +366,43 @@ fn handle_line(line: &str) -> Option<Response> {
     })
 }
 
+/// Turns `resources/read` parameters into contents.
+///
+/// A URI this session did not produce is an `Err`, which the caller turns into a
+/// JSON-RPC error rather than an empty success — asking for something that is not there
+/// is a mistake in the request, and answering it with silence would leave a model
+/// believing the file was empty.
+fn read_resource(params: Option<&Value>) -> std::result::Result<Value, String> {
+    let uri = params
+        .and_then(|params| params.get("uri"))
+        .and_then(Value::as_str)
+        .ok_or("resources/read needs a `uri`")?;
+    resources::read(uri)
+}
+
 fn initialize_result() -> Value {
     json!({
         "protocolVersion": PROTOCOL_VERSION,
-        // Only tools. No resources, no prompts, no sampling: declaring a capability
-        // this build does not implement would have clients calling into nothing.
-        "capabilities": {"tools": {"listChanged": false}},
+        // Tools and resources. Still no prompts and no sampling: declaring a
+        // capability this build does not implement would have clients calling into
+        // nothing.
+        //
+        // `subscribe` is false and `listChanged` is false because the list only ever
+        // changes as the direct result of a `codepack_export` the client itself asked
+        // for — it already knows.
+        "capabilities": {
+            "tools": {"listChanged": false},
+            "resources": {"subscribe": false, "listChanged": false}
+        },
         "serverInfo": {
             "name": SERVER_NAME,
             "version": env!("CARGO_PKG_VERSION")
         },
         "instructions": "Ask codepack_preview what an export would contain before \
                          asking for one, and codepack_explain when a file you expected \
-                         is missing from a bundle. Everything runs locally; nothing is \
-                         uploaded."
+                         is missing from a bundle. After codepack_export, that bundle's \
+                         reports are readable through resources/list and \
+                         resources/read. Everything runs locally; nothing is uploaded."
     })
 }
 
@@ -181,7 +422,11 @@ fn call_result(params: Option<&Value>) -> std::result::Result<Value, String> {
         .cloned()
         .unwrap_or_else(|| json!({}));
 
-    let outcome = tools::call(name, &arguments);
+    Ok(outcome_to_result(tools::call(name, &arguments)))
+}
+
+/// One tool outcome in `tools/call` result shape.
+fn outcome_to_result(outcome: tools::ToolOutcome) -> Value {
     let mut result = json!({
         "content": [{"type": "text", "text": outcome.text}],
         "isError": outcome.is_error
@@ -191,7 +436,7 @@ fn call_result(params: Option<&Value>) -> std::result::Result<Value, String> {
     {
         object.insert("structuredContent".to_string(), structured);
     }
-    Ok(result)
+    result
 }
 
 #[cfg(test)]
