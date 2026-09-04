@@ -46,6 +46,8 @@ export interface Config {
   /** Replace `<REDACTED>` with a stable per-secret label (`<REDACTED:s1>`). Off by
    * default, and off means every artifact is byte-identical to what it always was. */
   redaction_labels: boolean;
+  strict_token_checksums: boolean;
+  artifact_language: string;
 }
 
 /** A coding agent on this machine that a bundle can be handed to (stage S13). */
@@ -146,6 +148,24 @@ export interface ScanSummary {
   risky_code: number;
   total_findings: number;
   critical: number;
+}
+
+/** Why one file did, or did not, end up in an export. The same answer `codepack
+ * explain` gives at the terminal — one implementation, in the engine. */
+export interface FileExplanation {
+  file: string;
+  profile: string;
+  safe_mode: string;
+  diff_mode: string;
+  /** `included`, `excluded`, `not_in_diff`, or `not_planned`. */
+  verdict: string;
+  reason: string;
+  group: string | null;
+  severity: string | null;
+  size: number | null;
+  size_human: string | null;
+  skipped_directory: string | null;
+  exists_on_disk: boolean;
 }
 
 export interface ScanReport {

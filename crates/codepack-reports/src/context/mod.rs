@@ -43,6 +43,14 @@ impl<'a> ReportContext<'a> {
     pub fn resolve(&self, relative_path: &str) -> PathBuf {
         crate::paths::resolve(&self.staging_root, relative_path)
     }
+
+    /// The language this run's artifacts are written in.
+    ///
+    /// A method rather than a field: every report reaches it the same way, and the
+    /// context's shape — which a good deal of test code builds by hand — does not move.
+    pub fn artifact_language(&self) -> crate::i18n::Language {
+        crate::i18n::Language::from_config(self.config)
+    }
 }
 
 /// Redacts secrets from a single line of report output before it is written.

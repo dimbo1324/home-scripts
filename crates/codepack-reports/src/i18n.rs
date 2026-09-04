@@ -5,6 +5,10 @@
 //! reports is future scope, recorded honestly rather than silently deferred (see
 //! `task-checklist.md`).
 //!
+//! Wired since 2026-09-05 to `Config::artifact_language`, a field of its own — see
+//! [`Language::from_config`]. The note below explains why it is not
+//! `Config::language`, and still applies.
+//!
 //! This is deliberately **not** wired to `codepack_core::config::Config::language`:
 //! that field is the *interface* language (BLUEPRINT §A.10), while BLUEPRINT §B.6
 //! asks for a separate "artifact language" choice that does not exist as a `Config`
@@ -22,6 +26,19 @@ pub enum Language {
 }
 
 impl Language {
+    /// The language a run's artifacts are written in, from
+    /// `Config::artifact_language`.
+    ///
+    /// Anything this build does not recognise means English rather than an error: an
+    /// unknown language code in a settings file should degrade to the language every
+    /// report already has, not stop an export.
+    pub fn from_config(config: &codepack_core::config::Config) -> Self {
+        match config.artifact_language.trim().to_lowercase().as_str() {
+            "ru" => Language::Ru,
+            _ => Language::En,
+        }
+    }
+
     /// Picks `en` or `ru` depending on `self` — the whole mechanism, deliberately
     /// this small: a hand-written string table beats a templating dependency for a
     /// one-report pilot (per the stage plan's recommendation).

@@ -85,6 +85,7 @@ pub fn run() {
             commands::project::open_project,
             commands::project::preview_project,
             commands::project::scan_project,
+            commands::project::explain_file,
             commands::export::start_export,
             commands::export::cancel_export,
             commands::export::read_project_profile,

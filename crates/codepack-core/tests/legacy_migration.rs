@@ -130,6 +130,9 @@ fn json_shape_contains_all_expected_keys_with_expected_types() {
         // loads unchanged and takes the defaults.
         "ai_handoff_agent",
         "ai_handoff_question",
+        // Added 2026-09-05 with the artifact-language setting. Same reasoning: a new
+        // field with a `#[serde(default)]`, so an old settings file loads unchanged.
+        "artifact_language",
     ];
     let bool_fields = [
         "text_file_size_limit_enabled",

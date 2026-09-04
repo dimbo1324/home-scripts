@@ -99,16 +99,10 @@ pub(crate) fn resolve_project_root(path: &Path) -> Result<PathBuf> {
 /// but leaks into every artifact and error message the user reads. Strip that prefix
 /// when it is safe to do so; everywhere else this is plain canonicalization.
 pub(crate) fn canonicalize_existing(path: &Path) -> Result<PathBuf> {
-    let canonical = std::fs::canonicalize(path).map_err(|source| CliError::Read {
+    codepack_core::canonicalize_existing(path).map_err(|source| CliError::Read {
         path: path.to_path_buf(),
         source,
-    })?;
-    let text = canonical.to_string_lossy();
-    let stripped = text
-        .strip_prefix(r"\\?\")
-        .filter(|rest| !rest.starts_with("UNC\\"))
-        .map(PathBuf::from);
-    Ok(stripped.unwrap_or(canonical))
+    })
 }
 
 /// Opens the history database, creating its directory if needed.

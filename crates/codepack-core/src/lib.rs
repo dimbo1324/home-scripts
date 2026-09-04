@@ -17,7 +17,7 @@ pub use classify::{
     looks_binary, should_consider_text_file,
 };
 pub use error::{CoreError, Result};
-pub use paths::AppPaths;
+pub use paths::{AppPaths, canonicalize_existing};
 pub use progress::{
     LogEvent, LogLevel, ProgressEvent, ProgressReceiver, ProgressSender, progress_channel,
 };

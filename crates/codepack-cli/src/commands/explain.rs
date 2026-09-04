@@ -10,15 +10,15 @@
 //! explanation working, not a failure, so the exit code stays 0 for all three outcomes
 //! and 1 is reserved for actually failing to produce an answer.
 
-use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
-use codepack_core::CancellationToken;
 use serde::Serialize;
+
+use codepack_engine::explain::VERDICT_NOT_PLANNED;
 
 use crate::cli::ExplainArgs;
 use crate::commands::{self, ProjectContext};
-use crate::error::{CliError, Result};
+use crate::error::Result;
 use crate::exit::Outcome;
 use crate::output::{self, Format};
 use crate::settings::ResolutionTrace;
@@ -54,14 +54,6 @@ pub(crate) struct ExplainReport {
     pub resolution: ResolutionTrace,
 }
 
-const VERDICT_INCLUDED: &str = "included";
-const VERDICT_EXCLUDED: &str = "excluded";
-/// In the plan, but outside the diff selection — so the copy step will skip it and it
-/// reaches no bundle. A distinct verdict rather than a flavour of `excluded`, because
-/// the fix is different: widen `--diff`, not `--safe-mode` or `--profile`.
-const VERDICT_NOT_IN_DIFF: &str = "not_in_diff";
-const VERDICT_NOT_PLANNED: &str = "not_planned";
-
 pub(crate) fn run(args: &ExplainArgs, format: Format) -> Result<Outcome> {
     let context = commands::prepare(&args.project)?;
     let report = build(&context, &args.file)?;
@@ -75,279 +67,24 @@ pub(crate) fn run(args: &ExplainArgs, format: Format) -> Result<Outcome> {
 }
 
 pub(crate) fn build(context: &ProjectContext, requested: &Path) -> Result<ExplainReport> {
-    let relative = relative_to_project(&context.root, requested)?;
-    let key = plan_spelling(&relative);
-    // `symlink_metadata` rather than `exists()`: the walker never follows a symlink
-    // (invariant I7), so reporting "it exists" by dereferencing one would answer about
-    // a file outside the tree the plan describes.
-    let exists_on_disk = std::fs::symlink_metadata(context.root.join(&relative)).is_ok();
-
-    // Built exactly the way `preview` builds it, and for the same reason: explaining a
-    // file must not write a bundle, a report, or a history row.
-    let outcome = codepack_engine::plan_export(
-        &context.root,
-        &context.config,
-        &HashMap::new(),
-        None,
-        &CancellationToken::new(),
-    )?;
-    let plan = &outcome.export_plan;
-
-    // Lowercased rather than `eq_ignore_ascii_case`: this project ships Russian-named
-    // artifacts, and Windows folds non-ASCII case too, so an ASCII-only comparison
-    // would answer "not in the plan" about a file that is plainly in it.
-    let folded_key = key.to_lowercase();
-    let planned = plan
-        .included_files
-        .iter()
-        .chain(plan.excluded_files.iter())
-        .find(|file| file.relative_path.to_lowercase() == folded_key);
-
-    let mut report = ExplainReport {
+    let explanation =
+        codepack_engine::explain::explain_file(&context.root, &context.config, requested)?;
+    Ok(ExplainReport {
         project: context.root.display().to_string(),
-        file: key.clone(),
-        profile: context.config.normalized_export_profile().to_string(),
-        safe_mode: context.config.normalized_safe_export_mode().to_string(),
-        diff_mode: outcome.diff_selection.mode.clone(),
-        verdict: VERDICT_NOT_PLANNED,
-        reason: String::new(),
-        group: None,
-        severity: None,
-        size: None,
-        size_human: None,
-        skipped_directory: None,
-        exists_on_disk,
+        file: explanation.file,
+        profile: explanation.profile,
+        safe_mode: explanation.safe_mode,
+        diff_mode: explanation.diff_mode,
+        verdict: explanation.verdict,
+        reason: explanation.reason,
+        group: explanation.group,
+        severity: explanation.severity,
+        size: explanation.size,
+        size_human: explanation.size.map(codepack_tokens::format_bytes),
+        skipped_directory: explanation.skipped_directory,
+        exists_on_disk: explanation.exists_on_disk,
         resolution: context.resolution_for_output(),
-    };
-
-    if let Some(file) = planned {
-        report.file = file.relative_path.clone();
-        // Being in `included_files` is not enough to reach a bundle: under any diff
-        // mode but `all`, the copy step further restricts itself to
-        // `include_relative_paths` (see `codepack_engine::copy_project`). Reporting
-        // "included" for a file the copy will skip would be a confident wrong answer —
-        // and the `PR Review` preset makes `uncommitted` an everyday setting.
-        let in_diff_selection = outcome
-            .include_relative_paths
-            .as_ref()
-            .is_none_or(|selected| selected.contains(&file.relative_path));
-
-        report.verdict = match (file.status.as_str(), in_diff_selection) {
-            ("included", true) => VERDICT_INCLUDED,
-            ("included", false) => VERDICT_NOT_IN_DIFF,
-            _ => VERDICT_EXCLUDED,
-        };
-        report.reason = if report.verdict == VERDICT_NOT_IN_DIFF {
-            format!(
-                "the rules include it, but the `{}` diff selection does not",
-                outcome.diff_selection.mode
-            )
-        } else if file.reason.is_empty() {
-            default_reason(report.verdict).to_string()
-        } else {
-            file.reason.clone()
-        };
-        report.group = Some(file.group.clone());
-        report.severity = Some(file.severity.clone());
-        report.size = Some(file.size);
-        report.size_human = Some(codepack_tokens::format_bytes(file.size));
-        return Ok(report);
-    }
-
-    // The plan carries no per-file entry for anything under a directory the walk
-    // skipped — it never descended. "Your file is under `node_modules`" is the answer
-    // the user actually needs, so reconstruct it from `skipped_dirs`.
-    if let Some(entry) = skipped_directory_on_path(&plan.skipped_dirs, &relative) {
-        report.reason = format!("not visited: the directory {entry} was skipped");
-        report.skipped_directory = Some(entry);
-    } else if exists_on_disk {
-        report.reason =
-            "not in the plan: present on disk but not classified by this configuration".to_string();
-    } else {
-        report.reason = "not in the plan: no such file in this project".to_string();
-    }
-    Ok(report)
-}
-
-fn default_reason(verdict: &str) -> &'static str {
-    if verdict == VERDICT_INCLUDED {
-        "included by the current profile and safe mode"
-    } else {
-        "excluded by the current profile and safe mode"
-    }
-}
-
-/// Accepts an absolute path, a path relative to the project, or the backslash-joined
-/// form the plan itself stores — all three name the same file, and a user copying a
-/// path out of `manifest.json` should not have to translate it.
-fn relative_to_project(root: &Path, requested: &Path) -> Result<PathBuf> {
-    let text = requested.to_string_lossy().replace('\\', "/");
-    let normalized = PathBuf::from(text.trim_start_matches("./"));
-
-    let relative = if normalized.is_absolute() {
-        // Both sides are put through the same resolution before being compared. Anything
-        // less fails on Windows in ways that are easy to miss: CI caught
-        // `C:\Users\runneradmin\…` (the file, canonicalized) not matching
-        // `C:\Users\RUNNER~1\…` (the root, as given) — an 8.3 short name, which no
-        // amount of case-folding reconciles. The same applies to a junction or a mapped
-        // drive on one side only.
-        let candidate = resolve_through_existing_ancestor(&normalized)?;
-        let base = resolve_through_existing_ancestor(root)?;
-        strip_project_prefix(&base, &candidate).ok_or_else(|| {
-            CliError::message(format!(
-                "{} is not inside {}",
-                candidate.display(),
-                base.display()
-            ))
-        })?
-    } else {
-        normalized
-    };
-
-    if relative
-        .components()
-        .any(|part| part == Component::ParentDir)
-    {
-        return Err(CliError::message(format!(
-            "{} escapes the project directory",
-            requested.display()
-        )));
-    }
-    // `.` survives `trim_start_matches("./")` as a `CurDir` component, so an empty
-    // `OsStr` is not the only spelling of "the project root" that reaches here.
-    if relative
-        .components()
-        .all(|part| !matches!(part, Component::Normal(_)))
-    {
-        return Err(CliError::message(
-            "name a file to explain, not the project root".to_string(),
-        ));
-    }
-    Ok(relative)
-}
-
-/// Canonicalizes as much of `path` as exists, then re-appends the rest verbatim.
-///
-/// A path that does not exist cannot be canonicalized, and "this file is not in the
-/// project" is one of the answers `explain` must be able to give — so refusing to
-/// resolve a missing path would turn a legitimate question into an error. Resolving the
-/// longest existing ancestor gets the real spelling of every component that is actually
-/// on disk (short names expanded, symlinks followed, case as the filesystem stores it)
-/// and leaves only the genuinely-absent tail as typed.
-fn resolve_through_existing_ancestor(path: &Path) -> Result<PathBuf> {
-    let mut existing = path;
-    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
-    loop {
-        if existing.exists() {
-            let mut resolved = commands::canonicalize_existing(existing)?;
-            for part in tail.iter().rev() {
-                resolved.push(part);
-            }
-            return Ok(resolved);
-        }
-        match (existing.parent(), existing.file_name()) {
-            (Some(parent), Some(name)) => {
-                tail.push(name);
-                existing = parent;
-            }
-            // Nothing on this path exists, not even its root — nothing to resolve
-            // against, so the caller's spelling is the best available answer.
-            _ => return Ok(path.to_path_buf()),
-        }
-    }
-}
-
-/// `Path::strip_prefix` compares components byte-wise apart from the drive letter. Both
-/// sides reach here already resolved, so this is normally an exact match; the
-/// case-folded fallback covers the tail components that did not exist on disk and could
-/// therefore not be resolved — `C:\Proj\SRC\nope.rs` must still get the "no such file"
-/// answer rather than a hard error.
-fn strip_project_prefix(root: &Path, candidate: &Path) -> Option<PathBuf> {
-    if let Ok(relative) = candidate.strip_prefix(root) {
-        return Some(relative.to_path_buf());
-    }
-
-    let root_parts: Vec<String> = root
-        .components()
-        .map(|part| part.as_os_str().to_string_lossy().to_lowercase())
-        .collect();
-    let candidate_parts: Vec<_> = candidate.components().collect();
-    if candidate_parts.len() < root_parts.len() {
-        return None;
-    }
-    let matches = root_parts
-        .iter()
-        .zip(candidate_parts.iter())
-        .all(|(a, b)| *a == b.as_os_str().to_string_lossy().to_lowercase());
-    matches.then(|| candidate_parts[root_parts.len()..].iter().collect())
-}
-
-/// The plan stores paths backslash-joined regardless of platform (invariant I5), so a
-/// lookup key has to be built the same way rather than by `Path::display`.
-fn plan_spelling(relative: &Path) -> String {
-    relative
-        .components()
-        .filter_map(|part| match part {
-            Component::Normal(text) => Some(text.to_string_lossy().to_string()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\\")
-}
-
-/// Finds the skipped directory that contains this path, if any.
-///
-/// `skipped_dirs` holds already-rendered display strings — `.\node_modules` or
-/// `.\node_modules (ignored directory)` — so the structure has to be recovered from
-/// presentation. Splitting each entry on `" ("` would be ambiguous the moment a
-/// directory is itself named `my folder (v2)`: it would lose the real answer, and could
-/// match a *different* directory whose name happens to be the truncated prefix. So the
-/// direction is reversed — the path's own ancestors are rendered the way the plan would
-/// have rendered them, and an entry matches only if it is that ancestor exactly or that
-/// ancestor followed by a parenthesised reason. Both spellings are generated here from
-/// the same `format!` the scanner uses, so nothing is parsed at all.
-/// Residual ambiguity, named rather than hidden: a project containing both a skipped
-/// `build (old)` and a live `build` would, when asked about a *non-existent* file under
-/// the live one, be told the skipped sibling explains it. Exact matches are therefore
-/// preferred over parenthesised ones, which resolves the case that actually loses an
-/// answer (`my folder (v2)` really being skipped); what remains is a wrong explanatory
-/// sentence about a file that does not exist, and it costs a structured `SkippedDir` in
-/// a contract-frozen artifact to remove entirely.
-fn skipped_directory_on_path(skipped_dirs: &[String], relative: &Path) -> Option<String> {
-    let folded: Vec<String> = skipped_dirs.iter().map(|dir| dir.to_lowercase()).collect();
-    let rendered_ancestors = ancestor_renderings(relative);
-
-    for rendered in &rendered_ancestors {
-        if let Some(index) = folded.iter().position(|entry| entry == rendered) {
-            return Some(skipped_dirs[index].clone());
-        }
-    }
-    for rendered in &rendered_ancestors {
-        let with_reason = format!("{rendered} (");
-        if let Some(index) = folded
-            .iter()
-            .position(|entry| entry.starts_with(&with_reason))
-        {
-            return Some(skipped_dirs[index].clone());
-        }
-    }
-    None
-}
-
-/// Each directory on the path, rendered exactly the way `skipped_dirs` renders one, so
-/// nothing has to be parsed back out of a display string.
-fn ancestor_renderings(relative: &Path) -> Vec<String> {
-    let components: Vec<_> = relative.components().collect();
-    let mut ancestor = PathBuf::new();
-    let mut rendered = Vec::new();
-    for part in components.iter().take(components.len().saturating_sub(1)) {
-        let Component::Normal(name) = part else {
-            continue;
-        };
-        ancestor.push(name);
-        rendered.push(format!(".\\{}", plan_spelling(&ancestor)).to_lowercase());
-    }
-    rendered
+    })
 }
 
 fn print_human(report: &ExplainReport) {
@@ -379,6 +116,11 @@ mod tests {
     use super::*;
     use crate::settings::ResolutionTrace;
     use codepack_core::config::Config;
+    use codepack_engine::explain::{
+        VERDICT_EXCLUDED, VERDICT_INCLUDED, VERDICT_NOT_IN_DIFF, plan_spelling,
+        relative_to_project, resolve_through_existing_ancestor, skipped_directory_on_path,
+    };
+    use std::path::PathBuf;
 
     fn context(root: &Path, safe_mode: &str) -> ProjectContext {
         let config = Config {

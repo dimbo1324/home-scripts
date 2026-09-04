@@ -25,6 +25,11 @@ pub enum EngineError {
     #[error(transparent)]
     Allowlist(#[from] codepack_core::AllowlistError),
 
+    /// A question about one file that cannot be answered as asked — a path outside the
+    /// project, or one that cannot be resolved.
+    #[error("{0}")]
+    Explain(String),
+
     #[error("cannot create directory {path}: {source}")]
     Io {
         path: PathBuf,

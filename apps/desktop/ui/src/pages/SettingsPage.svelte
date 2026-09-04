@@ -229,6 +229,12 @@
           onchange={(checked) => (config.redaction_labels = checked)}
         />
         <Switch
+          label={t("settings.strictChecksums")}
+          hint={t("settings.strictChecksums.hint")}
+          checked={config.strict_token_checksums}
+          onchange={(checked) => (config.strict_token_checksums = checked)}
+        />
+        <Switch
           label={t("settings.includeGitPatch")}
           hint={t("settings.includeGitPatch.hint")}
           checked={config.include_git_patch}

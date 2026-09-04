@@ -36,6 +36,10 @@ use serde::{Deserialize, Serialize};
 /// brand-new artifact from day one).
 pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 
+/// Reports have always been English; the setting exists to allow another, not to change
+/// what an existing installation produces.
+pub const DEFAULT_ARTIFACT_LANGUAGE: &str = "en";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -103,6 +107,17 @@ pub struct Config {
     /// away. On, a documentation sample stops reading as a live credential. See
     /// `codepack_security::patterns::checksum`.
     pub strict_token_checksums: bool,
+    /// The language the *artifacts* are written in — separate from `language`, which is
+    /// the interface's (BLUEPRINT §A.10 against §B.6).
+    ///
+    /// Two settings because they answer to two people. The interface language belongs to
+    /// whoever runs the tool; the artifact language belongs to whoever will read the
+    /// bundle, who is often somebody else and is sometimes a model. Folding them into one
+    /// field would also have made `Config::default()` — whose interface language is `ru` —
+    /// silently switch every report to Russian.
+    ///
+    /// `en` by default, which is what every report has always been.
+    pub artifact_language: String,
 }
 
 impl Default for Config {
@@ -142,6 +157,7 @@ impl Default for Config {
             ai_handoff_question: String::new(),
             redaction_labels: false,
             strict_token_checksums: false,
+            artifact_language: DEFAULT_ARTIFACT_LANGUAGE.to_string(),
         }
     }
 }

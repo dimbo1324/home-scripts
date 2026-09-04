@@ -184,6 +184,22 @@ impl AppPaths {
     }
 }
 
+/// `std::fs::canonicalize` returns a `\\?\`-prefixed path on Windows, which is correct
+/// but leaks into every artifact and error message a user reads. Strip that prefix when
+/// it is safe to do so; everywhere else this is plain canonicalization.
+///
+/// The prefix stays on a UNC path (`\\?\UNC\...`), where removing it would produce a
+/// path that no longer names the same thing.
+pub fn canonicalize_existing(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let canonical = std::fs::canonicalize(path)?;
+    let text = canonical.to_string_lossy();
+    let stripped = text
+        .strip_prefix(r"\\?\")
+        .filter(|rest| !rest.starts_with("UNC\\"))
+        .map(std::path::PathBuf::from);
+    Ok(stripped.unwrap_or(canonical))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

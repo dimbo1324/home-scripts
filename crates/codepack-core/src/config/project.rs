@@ -120,6 +120,9 @@ pub struct ProjectConfig {
     /// Whether a failed vendor checksum weakens a provider finding. A team decision:
     /// it changes what this repository's pipeline will and will not fail on.
     pub strict_token_checksums: Option<bool>,
+    /// The language this repository's bundles are written in. A team decision: the
+    /// people who receive them have to be able to read them.
+    pub artifact_language: Option<String>,
 }
 
 impl ProjectConfig {
@@ -183,6 +186,7 @@ impl ProjectConfig {
             developer_context,
             redaction_labels,
             strict_token_checksums,
+            artifact_language,
         );
     }
 }

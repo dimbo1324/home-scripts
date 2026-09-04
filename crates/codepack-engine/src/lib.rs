@@ -28,6 +28,7 @@ mod analytics;
 mod budget;
 mod copy;
 mod error;
+pub mod explain;
 mod git_report;
 mod ignored_dirs;
 mod layout;

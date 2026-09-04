@@ -160,6 +160,18 @@ export const en = {
   "risk.high": "high",
   "risk.critical": "critical",
 
+  "preview.explain.failed": "Could not explain that file",
+  "preview.explain.title": "Why this file?",
+  "preview.explain.hint":
+    "The tree shows a short reason. This gives the full answer: which setting decided it, and what to change.",
+  "preview.explain.placeholder": "Path, relative to the project",
+  "preview.explain.ask": "Explain",
+  "preview.explain.asking": "Asking\u2026",
+  "preview.explain.verdict": "Verdict",
+  "preview.explain.reason": "Reason",
+  "preview.explain.missing": "Not present on disk",
+  "preview.explain.skipped": "Skipped directory",
+
   "preview.title": "Preview",
   "preview.lede":
     "Exactly what would go into the bundle, before anything is written. Override any single file.",
@@ -268,6 +280,12 @@ export const en = {
   "result.copyPath": "Copy the path",
   "result.viewHistory": "Export history",
   "result.newExport": "Export again",
+  "settings.strictChecksums": "Weaken a token whose checksum fails",
+  "settings.strictChecksums.hint":
+    "Some vendors build a checksum into their token format. Off by default: the recipe is reverse-engineered rather than published, and a mistake in it would quietly demote a real credential.",
+  "settings.artifactLanguage": "Report language",
+  "settings.artifactLanguage.hint":
+    "The language the bundle is written in \u2014 separate from the interface language, because the person who reads the bundle is often somebody else. Only the summary report is translated so far.",
   "settings.redactionLabels": "Label each secret separately",
   "settings.redactionLabels.hint":
     "Writes <REDACTED:s1> instead of <REDACTED>, so a reader can tell whether two redacted values are the same credential. The values themselves are never written either way.",

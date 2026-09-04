@@ -1,8 +1,8 @@
 <script lang="ts">
   // The last stop before anything is written: the exact file list, with the numbers that
   // decide whether it is the right one.
-  import { previewProject } from "$lib/api/client";
-  import type { FileStatus } from "$lib/api/types";
+  import { explainFile, previewProject } from "$lib/api/client";
+  import type { FileExplanation, FileStatus } from "$lib/api/types";
   import Callout from "$lib/components/Callout.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import Icon from "$lib/components/Icon.svelte";
@@ -14,6 +14,31 @@
   import { goTo, previewStamp, wizard } from "$lib/stores/wizard.svelte";
   import { formatCompact, formatCount } from "$lib/util/format";
   import { countFiles, filterTree, isFilterActive } from "$lib/util/tree";
+
+  // "Why is this file missing?" is asked while looking at the tree, so it is answered
+  // here. The verdict comes from the engine, which is the same code `codepack explain`
+  // runs — the two surfaces cannot disagree about a file.
+  let explainPath = $state("");
+  let explaining = $state(false);
+  let explanation = $state<FileExplanation | null>(null);
+
+  async function runExplain() {
+    const file = explainPath.trim();
+    if (!file || !wizard.project || !wizard.sessionConfig) return;
+    explaining = true;
+    try {
+      explanation = await explainFile(
+        wizard.project.root,
+        $state.snapshot(wizard.sessionConfig),
+        file,
+      );
+    } catch (error) {
+      explanation = null;
+      reportError("preview.explain.failed", error);
+    } finally {
+      explaining = false;
+    }
+  }
 
   let query = $state("");
   let status = $state<FileStatus | "all">("all");
@@ -208,6 +233,41 @@
         </p>
       {/if}
     </section>
+
+    <section class="card explain">
+      <h2 class="card__title">{t("preview.explain.title")}</h2>
+      <p class="explain__hint">{t("preview.explain.hint")}</p>
+      <div class="explain__ask">
+        <input
+          class="input"
+          type="text"
+          bind:value={explainPath}
+          placeholder={t("preview.explain.placeholder")}
+          onkeydown={(event) => {
+            if (event.key === "Enter") runExplain();
+          }}
+        />
+        <button class="btn" onclick={runExplain} disabled={explaining || !explainPath.trim()}>
+          {explaining ? t("preview.explain.asking") : t("preview.explain.ask")}
+        </button>
+      </div>
+      {#if explanation}
+        <dl class="explain__answer">
+          <dt>{t("preview.explain.verdict")}</dt>
+          <dd>{explanation.verdict}</dd>
+          <dt>{t("preview.explain.reason")}</dt>
+          <dd>{explanation.reason}</dd>
+          {#if explanation.skipped_directory}
+            <dt>{t("preview.explain.skipped")}</dt>
+            <dd>{explanation.skipped_directory}</dd>
+          {/if}
+          {#if !explanation.exists_on_disk}
+            <dt>{t("preview.explain.missing")}</dt>
+            <dd>{explanation.file}</dd>
+          {/if}
+        </dl>
+      {/if}
+    </section>
   {/if}
 </div>
 
@@ -278,6 +338,35 @@
     flex: 1;
     overflow: auto;
     padding: var(--space-3) var(--space-2);
+  }
+
+  .explain__hint {
+    color: var(--text-muted);
+    margin: 0 0 var(--space-3);
+  }
+
+  .explain__ask {
+    display: flex;
+    gap: var(--space-2);
+  }
+
+  .explain__ask .input {
+    flex: 1;
+  }
+
+  .explain__answer {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: var(--space-1) var(--space-3);
+    margin: var(--space-3) 0 0;
+  }
+
+  .explain__answer dt {
+    color: var(--text-muted);
+  }
+
+  .explain__answer dd {
+    margin: 0;
   }
 
   .tree-footer {

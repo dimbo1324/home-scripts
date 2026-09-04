@@ -11,7 +11,8 @@ use codepack_core::config::Config;
 use codepack_security::{SecurityOptions, scan_project as run_security_scan};
 
 use crate::dto::{
-    Finding, PreviewReport, ProjectContext, ResolutionTrace, ScanReport, ScanSummary,
+    FileExplanation, Finding, PreviewReport, ProjectContext, ResolutionTrace, ScanReport,
+    ScanSummary,
 };
 use crate::error::{CommandError, CommandResult};
 use crate::tree;
@@ -347,4 +348,36 @@ mod tests {
         let file = dir.path().join("README.md");
         assert!(open_project(file.display().to_string()).is_err());
     }
+}
+
+/// Why one file did, or did not, end up in an export.
+///
+/// Thin on purpose: the verdict is `codepack-engine`'s, exactly as the CLI's `explain`
+/// command gets it. The preview tree already shows a short reason per excluded file;
+/// this answers the fuller question a person asks while looking at that tree — which
+/// setting decided it, and whether widening the diff or the safe mode is the fix.
+#[tauri::command]
+pub fn explain_file(
+    project_root: String,
+    config: Config,
+    file: String,
+) -> CommandResult<FileExplanation> {
+    let root = resolve_project_root(&project_root)?;
+    let explanation =
+        codepack_engine::explain::explain_file(&root, &config, std::path::Path::new(&file))
+            .map_err(CommandError::new)?;
+    Ok(FileExplanation {
+        file: explanation.file,
+        profile: explanation.profile,
+        safe_mode: explanation.safe_mode,
+        diff_mode: explanation.diff_mode,
+        verdict: explanation.verdict.to_string(),
+        reason: explanation.reason,
+        group: explanation.group,
+        severity: explanation.severity,
+        size: explanation.size,
+        size_human: explanation.size.map(codepack_tokens::format_bytes),
+        skipped_directory: explanation.skipped_directory,
+        exists_on_disk: explanation.exists_on_disk,
+    })
 }

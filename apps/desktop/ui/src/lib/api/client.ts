@@ -16,6 +16,7 @@ import type {
   Config,
   ExportFinishedEvent,
   ExportProgressEvent,
+  FileExplanation,
   HistoryReport,
   PreviewReport,
   ProjectContext,
@@ -111,6 +112,16 @@ export function previewProject(
 
 export function scanProject(projectRoot: string, config: Config): Promise<ScanReport> {
   return invoke("scan_project", { projectRoot, config });
+}
+
+/** Why one file did, or did not, end up in an export. `file` may be absolute, relative
+ * to the project, or spelled the way the plan stores it. */
+export function explainFile(
+  projectRoot: string,
+  config: Config,
+  file: string,
+): Promise<FileExplanation> {
+  return invoke("explain_file", { projectRoot, config, file });
 }
 
 /** Starts an export on a background thread and returns immediately with a run id.

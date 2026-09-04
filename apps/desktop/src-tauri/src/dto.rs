@@ -302,3 +302,26 @@ pub struct SanitizeFinishedEvent {
     pub report: Option<SanitizeReport>,
     pub error: Option<String>,
 }
+
+// --- Explain ------------------------------------------------------------------------
+
+/// Why one file did, or did not, end up in an export.
+///
+/// A straight rendering of `codepack_engine::explain::FileExplanation`, which is the
+/// same value the CLI's `explain` command reports — the two surfaces cannot disagree
+/// about a file because there is only one answer.
+#[derive(Debug, Clone, Serialize)]
+pub struct FileExplanation {
+    pub file: String,
+    pub profile: String,
+    pub safe_mode: String,
+    pub diff_mode: String,
+    pub verdict: String,
+    pub reason: String,
+    pub group: Option<String>,
+    pub severity: Option<String>,
+    pub size: Option<u64>,
+    pub size_human: Option<String>,
+    pub skipped_directory: Option<String>,
+    pub exists_on_disk: bool,
+}

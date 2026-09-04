@@ -27,7 +27,7 @@ pub const JOB: ReportJob = ReportJob {
 };
 
 fn write_summary_report(ctx: &ReportContext<'_>, output_file: &Path) -> Result<(), ReportError> {
-    let rendered = render_summary_report(ctx, Language::En);
+    let rendered = render_summary_report(ctx, ctx.artifact_language());
     std::fs::write(output_file, rendered).map_err(|source| ReportError::Write {
         path: output_file.to_path_buf(),
         source,
