@@ -50,6 +50,38 @@ const HOOK_MARKER: &str = "# codepack-managed-hook";
 /// installed the tool; failing their commits over a tool they did not choose would get
 /// the hook deleted, which protects nobody. It says so loudly instead, on stderr, every
 /// single time — the failure mode this file has to avoid is the *quiet* one.
+/// The strict counterpart, for a team that would rather stop than proceed unchecked.
+///
+/// Same hook, one different answer to one question: a missing binary fails the commit
+/// instead of warning past it (Q35). Both defaults are defensible and neither is right
+/// for everyone — a shared repository where the tool is part of the setup wants this
+/// one, and an open-source project whose contributors never chose codepack does not.
+/// The choice is the installer's, made once, and visible in the hook's own text.
+const HOOK_SCRIPT_STRICT: &str = r#"#!/bin/sh
+# codepack-managed-hook
+#
+# Blocks a commit that would add a critical secret, reading the staged content itself
+# rather than the working tree. Written by `codepack init --hook --strict`; safe to
+# delete.
+#
+# Strict: if codepack is missing, the commit is refused rather than let through
+# unchecked. Reinstall without --strict to warn and continue instead.
+if ! command -v codepack >/dev/null 2>&1; then
+    echo "codepack: not installed, so this commit CANNOT be checked for secrets." >&2
+    echo "codepack: install it, reinstall the hook without --strict, or delete the hook." >&2
+    exit 1
+fi
+
+codepack scan --staged
+status=$?
+if [ $status -ne 0 ]; then
+    echo "" >&2
+    echo "codepack: commit blocked. Fix the findings above, or accept one by adding its" >&2
+    echo "codepack: fingerprint to .codepack-allow, then commit again." >&2
+fi
+exit $status
+"#;
+
 const HOOK_SCRIPT: &str = r#"#!/bin/sh
 # codepack-managed-hook
 #
@@ -84,6 +116,8 @@ pub(crate) struct InitReport {
     pub action: &'static str,
     /// True when `core.hooksPath` pointed the hook somewhere other than `.git/hooks`.
     pub custom_hooks_path: bool,
+    /// True when the installed hook refuses a commit it cannot check.
+    pub strict: bool,
 }
 
 pub(crate) fn run(args: &InitArgs, format: Format) -> Result<Outcome> {
@@ -94,7 +128,7 @@ pub(crate) fn run(args: &InitArgs, format: Format) -> Result<Outcome> {
     }
 
     let root = commands::resolve_project_root(&args.project.path)?;
-    let report = install_hook(&root, args.force)?;
+    let report = install_hook_with(&root, args.force, args.strict)?;
 
     if format.is_json() {
         output::emit_json("init", &report)?;
@@ -104,7 +138,7 @@ pub(crate) fn run(args: &InitArgs, format: Format) -> Result<Outcome> {
     Ok(Outcome::Success)
 }
 
-fn install_hook(project_root: &Path, force: bool) -> Result<InitReport> {
+fn install_hook_with(project_root: &Path, force: bool, strict: bool) -> Result<InitReport> {
     let repository = git2::Repository::discover(project_root).map_err(|error| {
         CliError::message(format!(
             "a pre-commit hook needs a git repository, and {} is not inside one ({})",
@@ -133,7 +167,12 @@ fn install_hook(project_root: &Path, force: bool) -> Result<InitReport> {
         Err(_) => "installed",
     };
 
-    std::fs::write(&hook, HOOK_SCRIPT).map_err(|source| CliError::Read {
+    let script = if strict {
+        HOOK_SCRIPT_STRICT
+    } else {
+        HOOK_SCRIPT
+    };
+    std::fs::write(&hook, script).map_err(|source| CliError::Read {
         path: hook.clone(),
         source,
     })?;
@@ -143,6 +182,7 @@ fn install_hook(project_root: &Path, force: bool) -> Result<InitReport> {
         project: project_root.display().to_string(),
         hook: hook.display().to_string(),
         action,
+        strict,
         custom_hooks_path,
     })
 }
@@ -211,6 +251,9 @@ fn print_human(report: &InitReport) {
     }
     output::line("");
     output::line("Every commit now runs: codepack scan --staged");
+    if report.strict {
+        output::line("A commit is refused when codepack is not installed (--strict).");
+    }
     output::line("Findings you have accepted go in .codepack-allow beside the project.");
 }
 
@@ -230,7 +273,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         repository(dir.path());
 
-        let report = install_hook(dir.path(), false).unwrap();
+        let report = install_hook_with(dir.path(), false, false).unwrap();
 
         assert_eq!(report.action, "installed");
         assert!(!report.custom_hooks_path);
@@ -244,8 +287,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         repository(dir.path());
 
-        install_hook(dir.path(), false).unwrap();
-        let report = install_hook(dir.path(), false).unwrap();
+        install_hook_with(dir.path(), false, false).unwrap();
+        let report = install_hook_with(dir.path(), false, false).unwrap();
         assert_eq!(report.action, "updated");
     }
 
@@ -257,7 +300,9 @@ mod tests {
         std::fs::create_dir_all(&hooks).unwrap();
         std::fs::write(hooks.join("pre-commit"), "#!/bin/sh\nmake lint\n").unwrap();
 
-        let error = install_hook(dir.path(), false).unwrap_err().to_string();
+        let error = install_hook_with(dir.path(), false, false)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("--force"), "{error}");
 
         let survived = std::fs::read_to_string(hooks.join("pre-commit")).unwrap();
@@ -275,7 +320,7 @@ mod tests {
         std::fs::create_dir_all(&hooks).unwrap();
         std::fs::write(hooks.join("pre-commit"), "#!/bin/sh\nmake lint\n").unwrap();
 
-        let report = install_hook(dir.path(), true).unwrap();
+        let report = install_hook_with(dir.path(), true, false).unwrap();
         assert_eq!(report.action, "replaced");
         assert!(
             std::fs::read_to_string(&report.hook)
@@ -295,7 +340,7 @@ mod tests {
             .set_str("core.hooksPath", ".githooks")
             .unwrap();
 
-        let report = install_hook(dir.path(), false).unwrap();
+        let report = install_hook_with(dir.path(), false, false).unwrap();
 
         assert!(report.custom_hooks_path);
         // Canonicalised on both sides, and never compared as text. `git2` reports the
@@ -313,7 +358,9 @@ mod tests {
     #[test]
     fn a_directory_outside_any_repository_is_an_error_that_says_so() {
         let dir = tempfile::tempdir().unwrap();
-        let error = install_hook(dir.path(), false).unwrap_err().to_string();
+        let error = install_hook_with(dir.path(), false, false)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("git repository"), "{error}");
     }
 

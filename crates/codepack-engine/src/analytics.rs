@@ -55,20 +55,39 @@ pub struct AnalyticsOutcome {
     pub replan: ExportPlan,
 }
 
-fn full_job_catalog() -> Vec<ReportJob> {
-    // Legacy's job #0 leads the catalog, so `REPORT_PLUGINS.json` lists it first and
-    // `reports/insights/00_project_profile.json` exists before any later report can
-    // reference it.
-    std::iter::once(codepack_reports::project_profile::JOB)
-        .chain(codepack_reports::group_a_jobs())
+/// The catalog in the three phases it actually has, in order.
+///
+/// Flattened it is the same list as before, and `REPORT_PLUGINS.json` is still written
+/// from that flat list. The split exists because only the middle phase is safely
+/// concurrent:
+///
+/// - **First**, legacy's job #0, so `REPORT_PLUGINS.json` lists it first and
+///   `reports/insights/00_project_profile.json` exists before anything could reference
+///   it.
+/// - **Then** every ordinary report. Each writes one file of its own and reads nothing
+///   but the context, so they are independent of each other.
+/// - **Last**, `REPORT_DASHBOARD.html`, which reads other reports' output files as
+///   already-written siblings and is documented as having to run after them.
+fn job_phases() -> (Vec<ReportJob>, Vec<ReportJob>, Vec<ReportJob>) {
+    let first = vec![codepack_reports::project_profile::JOB];
+    let middle = codepack_reports::group_a_jobs()
+        .into_iter()
         .chain(codepack_reports::group_b_jobs())
         .chain(codepack_reports::group_c_jobs())
         .chain(codepack_reports::group_d_jobs())
         .chain(codepack_reports::group_e_jobs())
         .chain(codepack_reports::group_f_jobs())
         .chain(codepack_reports::group_h_human_jobs())
-        .chain(codepack_reports::group_g_finish_jobs())
-        .collect()
+        .collect();
+    let last = codepack_reports::group_g_finish_jobs()
+        .into_iter()
+        .collect();
+    (first, middle, last)
+}
+
+fn full_job_catalog() -> Vec<ReportJob> {
+    let (first, middle, last) = job_phases();
+    first.into_iter().chain(middle).chain(last).collect()
 }
 
 /// Runs pipeline step 6. `diff_selection` is [`crate::plan::PlanOutcome::diff_selection`]
@@ -187,7 +206,22 @@ pub fn run_analytics(
 
     codepack_reports::write_report_plugins_json(&jobs, &paths.insights_dir)?;
 
-    let run_summary = codepack_reports::run_reports(&jobs, &ctx, &paths.insights_dir);
+    // Three phases rather than one list: the middle one is a set of independent jobs and
+    // runs concurrently, while the profile has to be first and the dashboard has to be
+    // last. `run_reports_parallel` folds its outcomes in job order, so the summary and
+    // the `ERROR_<name>.txt` files come out exactly as they did sequentially.
+    let (first_jobs, middle_jobs, last_jobs) = job_phases();
+    let mut run_summary = codepack_reports::run_reports(&first_jobs, &ctx, &paths.insights_dir);
+    run_summary.absorb(codepack_reports::run_reports_parallel(
+        &middle_jobs,
+        &ctx,
+        &paths.insights_dir,
+    ));
+    run_summary.absorb(codepack_reports::run_reports(
+        &last_jobs,
+        &ctx,
+        &paths.insights_dir,
+    ));
 
     // Legacy's `project_profile_job` writes the catalog file and then copies it to the
     // bundle root (`shutil.copyfile`), rather than building the profile twice.

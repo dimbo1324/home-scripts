@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+rayon.workspace = true
 codepack-core.workspace = true
 codepack-scanner.workspace = true
 codepack-security.workspace = true

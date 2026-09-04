@@ -11,7 +11,9 @@
 //! belt-and-braces with the workflow's `pnpm install` step, it is what makes deleting that
 //! step impossible to do quietly.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
 use std::process::Command;
 
 /// pnpm ships as `pnpm.CMD` on Windows, and `std::process::Command` only ever appends
@@ -120,6 +122,8 @@ pub(crate) fn package(root: &Path) -> Result<(), String> {
                     size as f64 / (1024.0 * 1024.0)
                 );
             }
+            let sums = write_checksums(&bundle)?;
+            println!("checksums: {}", sums.display());
             Ok(())
         }
         // The build reported success, so a missing directory means the bundler wrote
@@ -130,4 +134,48 @@ pub(crate) fn package(root: &Path) -> Result<(), String> {
             bundle.display()
         )),
     }
+}
+
+const CHECKSUM_FILE: &str = "SHA256SUMS.txt";
+
+/// Writes `SHA256SUMS.txt` beside the installers, in the format `sha256sum -c` reads:
+/// the hex digest, two spaces, the file name.
+///
+/// This is the half of stage S14's "signed, checksummed release" that needs nothing but
+/// arithmetic. It does not replace code signing: a checksum proves a download arrived
+/// intact, not that it came from anyone in particular, and only a certificate can say
+/// the second thing.
+///
+/// Names, never paths — the file is published next to the installers and verified from
+/// the directory it sits in. Entries are sorted, so the same set of files always
+/// produces the same file.
+fn write_checksums(bundle: &Path) -> Result<PathBuf, String> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(bundle)
+        .map_err(|error| format!("cannot list {}: {error}", bundle.display()))?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && path.file_name() != Some(CHECKSUM_FILE.as_ref()))
+        .collect();
+    entries.sort();
+
+    let mut lines: Vec<String> = Vec::new();
+    for path in entries {
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        let digest = Sha256::digest(&bytes);
+        let mut hex = String::with_capacity(digest.len() * 2);
+        for byte in digest.iter() {
+            use std::fmt::Write as _;
+            let _ = write!(hex, "{byte:02x}");
+        }
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        lines.push(format!("{hex}  {name}"));
+    }
+
+    let target = bundle.join(CHECKSUM_FILE);
+    let mut body = lines.join("\n");
+    body.push('\n');
+    std::fs::write(&target, body)
+        .map_err(|error| format!("cannot write {}: {error}", target.display()))?;
+    Ok(target)
 }

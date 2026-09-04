@@ -73,7 +73,7 @@ mod wordscan;
 pub use context::ReportContext;
 pub use error::{ReportError, Result};
 pub use metadata::{IndexInput, ManifestInput, write_index_md, write_manifest};
-pub use plugin::{ReportJob, RunSummary, run_reports};
+pub use plugin::{ReportJob, RunSummary, run_reports, run_reports_parallel};
 pub use plugins_json::write_report_plugins_json;
 pub use project_profile::{ProjectProfile, build_project_profile, write_project_profile_json};
 pub use reports::{

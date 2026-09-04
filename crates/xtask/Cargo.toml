@@ -7,8 +7,13 @@ rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# Intentionally dependency-free: the gate must run instantly and without network access.
+# Near enough to dependency-free: the gate must run instantly and without network access.
+# `sha2` is the one exception, for `package`'s SHA256SUMS.txt. It is already in this
+# workspace's lock file and its build tree, so it costs the gate nothing — and the
+# alternative, a hand-written hash inside the tool that tells users a download is
+# authentic, is not a trade worth making.
 [dependencies]
+sha2.workspace = true
 
 [lints]
 workspace = true

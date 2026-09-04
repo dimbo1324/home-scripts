@@ -85,6 +85,15 @@ pub(crate) struct InitArgs {
     #[arg(long)]
     pub hook: bool,
 
+    /// Refuse a commit the hook cannot check, instead of warning and allowing it.
+    ///
+    /// Without this, a colleague who has never installed codepack still commits; the
+    /// hook says loudly that nothing was checked. With it, that commit is refused. Which
+    /// is right depends on whether everyone who commits here is expected to have the
+    /// tool, and only the person installing the hook can say.
+    #[arg(long)]
+    pub strict: bool,
+
     /// Replace an existing hook that codepack did not write.
     #[arg(long)]
     pub force: bool,
