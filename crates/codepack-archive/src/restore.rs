@@ -51,6 +51,11 @@ pub struct ExtractLimits {
     /// Members, of any size. Guards the other shape of the same attack: millions of
     /// empty files, which costs inodes and time rather than bytes.
     pub max_entries: usize,
+    /// Path segments in one member's name. A member called `a/a/…/a/f.txt` costs almost
+    /// nothing to send and creates an arbitrarily deep tree on disk, which is a stack
+    /// overflow in whatever walks it afterwards — `codepack verify` walks it immediately.
+    /// Bytes and member counts do not see this shape at all.
+    pub max_depth: usize,
 }
 
 impl Default for ExtractLimits {
@@ -59,6 +64,10 @@ impl Default for ExtractLimits {
             max_total_bytes: 8 * 1024 * 1024 * 1024,
             max_entry_bytes: 2 * 1024 * 1024 * 1024,
             max_entries: 200_000,
+            // Deeper than any real project. The deepest thing a bundle legitimately
+            // carries is a `node_modules` tree, and those are tens of levels, not
+            // hundreds.
+            max_depth: 64,
         }
     }
 }
@@ -180,6 +189,14 @@ fn extract_zip_inner(
                 source,
             })?;
         let member_name = zip_entry.name().to_string();
+
+        if Path::new(&member_name).components().count() > limits.max_depth {
+            return Err(ExtractLimits::exceeded(
+                archive_path,
+                "member-depth",
+                limits.max_depth.to_string(),
+            ));
+        }
 
         let enclosed_name = zip_entry.enclosed_name();
         let safe_target = safe_member_target(destination, &member_name);
@@ -568,11 +585,45 @@ mod tests {
         assert!(destination.path().join("nested/b.txt").is_file());
     }
 
+    /// The shape neither the byte budget nor the member count can see: one member, a
+    /// handful of bytes on the wire, and an arbitrarily deep tree on disk. Whatever
+    /// walks that tree next recurses once per level (audit No. 9).
+    #[test]
+    fn a_member_nested_past_the_depth_ceiling_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep = format!("{}/f.txt", ["a"; 8].join("/"));
+        let archive = archive_of(dir.path(), &[(deep.as_str(), 1)]);
+        let destination = tempfile::tempdir().unwrap();
+
+        let error = extract_zip_with_limits(&archive, destination.path(), tiny_limits())
+            .expect_err("depth must be bounded too");
+        let rendered = error.to_string();
+        assert!(rendered.contains("member-depth"), "{rendered}");
+        assert!(
+            rendered.contains('4'),
+            "the message must name the ceiling: {rendered}"
+        );
+    }
+
+    /// And an ordinary nesting depth still extracts, or the ceiling would be refusing
+    /// real bundles.
+    #[test]
+    fn ordinary_nesting_is_untouched_by_the_depth_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_of(dir.path(), &[("src/reports/insights/a.json", 10)]);
+        let destination = tempfile::tempdir().unwrap();
+
+        let extracted =
+            extract_zip_with_limits(&archive, destination.path(), tiny_limits()).expect("ordinary");
+        assert_eq!(extracted, 1);
+    }
+
     fn tiny_limits() -> ExtractLimits {
         ExtractLimits {
             max_total_bytes: 4096,
             max_entry_bytes: 1024,
             max_entries: 8,
+            max_depth: 4,
         }
     }
 
@@ -756,7 +807,11 @@ mod ambiguous_member_names {
     /// A name whose every segment is legal but which nests very deeply is not an escape,
     /// and is accepted — the depth ceiling that matters is the byte budget, not the path.
     #[test]
-    fn deep_nesting_is_allowed_because_it_does_not_escape() {
+    // Depth is not this function's question — it answers "does this escape". The
+    // ceiling on depth is `ExtractLimits::max_depth`, enforced during extraction, and it
+    // exists because an arbitrarily deep tree overflows the stack of whatever walks it
+    // next (audit No. 9).
+    fn deep_nesting_does_not_escape_which_is_all_this_function_decides() {
         let destination = Path::new("/dest");
         let deep = vec!["a"; 64].join("/");
         let target = safe_member_target(destination, &deep).expect("legal, if silly");
@@ -796,6 +851,7 @@ mod ambiguous_member_names {
             max_total_bytes: 16,
             max_entry_bytes: 16,
             max_entries: 32,
+            max_depth: 8,
         };
         let extracted = extract_zip_with_limits(&path, destination.path(), limits)
             .expect("directories cost no bytes");

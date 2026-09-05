@@ -36,6 +36,7 @@ git2.workspace = true
 # Both `verify` and `scan --staged` materialise content into a temporary directory that
 # must disappear on every exit path; this is production use, not test-only.
 tempfile.workspace = true
+walkdir.workspace = true
 
 [dev-dependencies]
 # End-to-end tests open the produced bundle to prove a secret never entered it.

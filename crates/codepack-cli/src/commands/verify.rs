@@ -74,6 +74,12 @@ pub(crate) struct VerifyReport {
     /// `zip`, `archive_set` or `directory` — what the path turned out to be.
     pub bundle_kind: &'static str,
     pub scanned_files: usize,
+    /// True when the bundle's tree is deeper than [`MAX_BUNDLE_DEPTH`], so parts of it
+    /// were never read. A clean verdict then covers less than the whole bundle, and
+    /// saying so is the entire point of the field. Absent from the payload when false —
+    /// additive, so no schema bump.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub depth_truncated: bool,
     /// Counted over the exported content only — the numbers the verdict is based on.
     pub summary: Summary,
     /// Findings in the exported project's own content. These drive the exit code.
@@ -158,7 +164,7 @@ fn build(bundle: &Path, allowlist_root: Option<&Path>) -> Result<VerifyReport> {
     let opened = open(bundle)?;
     let root = opened.root();
 
-    let relative_files = collect_files(root)?;
+    let (relative_files, depth_truncated) = collect_files(root)?;
     // No size limit: a limit is a statement about what is worth *shipping*, and this
     // command is looking at something already shipped. The same reasoning `scan` records
     // for `text_file_size_limit_enabled`.
@@ -177,6 +183,7 @@ fn build(bundle: &Path, allowlist_root: Option<&Path>) -> Result<VerifyReport> {
         opened.kind(),
         root,
         relative_files.len(),
+        depth_truncated,
         &screened,
     ))
 }
@@ -222,44 +229,62 @@ fn temp_dir() -> Result<tempfile::TempDir> {
 
 /// Every file under `root`, as paths relative to it.
 ///
+/// How deep a bundle's tree may be before this walk stops descending.
+///
+/// A bundle is untrusted input, and a single archive member named `a/a/…/a/f.txt` costs
+/// almost nothing to send while creating an arbitrarily deep tree on disk. The walk used
+/// to be direct recursion with one stack frame per level, so that member was a stack
+/// overflow — the process dying, unhandled, on the say-so of the file it was checking.
+/// `codepack_archive::ExtractLimits::max_depth` now refuses such a member at extraction
+/// too; this is the same ceiling on the consuming side, because `verify` also accepts a
+/// bundle that is already an ordinary directory.
+///
+/// 64 is past anything real: the deepest tree a bundle legitimately carries is a
+/// dependency directory, and those are tens of levels.
+const MAX_BUNDLE_DEPTH: usize = 64;
+
+/// The files of a bundle, relative to `root`, and whether the depth ceiling cut the walk
+/// short.
+///
 /// Symlinks are not followed: a bundle is untrusted input, and a link pointing out of
 /// the extracted tree would otherwise be read from wherever it aimed (invariant I7).
-fn collect_files(root: &Path) -> Result<Vec<PathBuf>> {
+///
+/// Truncation is returned rather than swallowed. A security check that quietly examined
+/// less than the whole bundle, and then printed a clean verdict, is worse than one that
+/// fails — the same principle `history_scan` already applies to its commit cap.
+fn collect_files(root: &Path) -> Result<(Vec<PathBuf>, bool)> {
     let mut files = Vec::new();
-    walk(root, root, &mut files)?;
-    files.sort();
-    Ok(files)
-}
+    let mut truncated = false;
 
-fn walk(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    let entries = std::fs::read_dir(directory).map_err(|source| CliError::Read {
-        path: directory.to_path_buf(),
-        source,
-    })?;
-
-    for entry in entries {
-        let entry = entry.map_err(|source| CliError::Read {
-            path: directory.to_path_buf(),
-            source,
-        })?;
-        let path = entry.path();
-        let metadata = std::fs::symlink_metadata(&path).map_err(|source| CliError::Read {
-            path: path.clone(),
-            source,
+    for entry in walkdir::WalkDir::new(root)
+        .max_depth(MAX_BUNDLE_DEPTH)
+        .follow_links(false)
+        .sort_by_file_name()
+    {
+        let entry = entry.map_err(|error| CliError::Read {
+            path: error.path().unwrap_or(root).to_path_buf(),
+            source: error.into_io_error().unwrap_or_else(|| {
+                std::io::Error::other("the bundle's directory tree could not be read")
+            }),
         })?;
 
-        if metadata.file_type().is_symlink() {
+        // A directory sitting exactly at the ceiling is one this walk did not open.
+        if entry.depth() == MAX_BUNDLE_DEPTH && entry.file_type().is_dir() {
+            truncated = true;
             continue;
         }
-        if metadata.is_dir() {
-            walk(root, &path, files)?;
-        } else if metadata.is_file()
-            && let Ok(relative) = path.strip_prefix(root)
-        {
+        // `file_type` here is the entry's own type because links are not followed, so a
+        // symlink is a symlink rather than whatever it aims at.
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if let Ok(relative) = entry.path().strip_prefix(root) {
             files.push(relative.to_path_buf());
         }
     }
-    Ok(())
+
+    files.sort();
+    Ok((files, truncated))
 }
 
 fn assemble(
@@ -267,6 +292,7 @@ fn assemble(
     bundle_kind: &'static str,
     root: &Path,
     scanned_files: usize,
+    depth_truncated: bool,
     screened: &crate::allow::Screened,
 ) -> VerifyReport {
     let (generated, content): (Vec<_>, Vec<_>) = screened.findings.iter().partition(|finding| {
@@ -296,6 +322,7 @@ fn assemble(
         bundle: bundle.display().to_string(),
         bundle_kind,
         scanned_files,
+        depth_truncated,
         summary: Summary {
             sensitive_files: count_of(FindingKind::SensitiveFile),
             potential_secrets: count_of(FindingKind::PotentialSecret),
@@ -434,6 +461,13 @@ fn print_human(report: &VerifyReport) {
         "Contents:  {} file(s) ({})",
         report.scanned_files, report.bundle_kind
     ));
+    if report.depth_truncated {
+        // Before the verdict, not after it: a reader who stops at "Clean" must have
+        // already been told the check did not cover everything.
+        output::line(format!(
+            "WARNING:   this bundle is nested deeper than {MAX_BUNDLE_DEPTH} levels, and              anything below that was NOT checked."
+        ));
+    }
 
     if let Some(path) = &report.allowlist {
         if report.suppressed.is_empty() {
@@ -495,6 +529,41 @@ fn print_findings(findings: &[ReportedFinding]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tree deeper than the ceiling is walked without dying, and the report says the
+    /// check was incomplete. Silence here would be the worst outcome available: a clean
+    /// verdict over a bundle that was only partly read.
+    #[test]
+    fn a_tree_deeper_than_the_ceiling_truncates_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut deep = dir.path().to_path_buf();
+        for _ in 0..(MAX_BUNDLE_DEPTH + 10) {
+            deep.push("a");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("buried.txt"), "AWS_KEY = 'x'\n").unwrap();
+        std::fs::write(dir.path().join("shallow.txt"), "hello\n").unwrap();
+
+        let (files, truncated) = collect_files(dir.path()).expect("the walk must not die");
+
+        assert!(truncated, "the ceiling was reached and must be reported");
+        assert!(files.iter().any(|path| path.ends_with("shallow.txt")));
+        assert!(
+            !files.iter().any(|path| path.ends_with("buried.txt")),
+            "anything past the ceiling was not read, and the flag is what says so"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_tree_is_not_reported_as_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("reports/insights")).unwrap();
+        std::fs::write(dir.path().join("reports/insights/a.json"), "{}").unwrap();
+
+        let (files, truncated) = collect_files(dir.path()).expect("walks");
+        assert!(!truncated);
+        assert_eq!(files.len(), 1);
+    }
 
     fn write(root: &Path, relative: &str, contents: &str) {
         let path = root.join(relative);

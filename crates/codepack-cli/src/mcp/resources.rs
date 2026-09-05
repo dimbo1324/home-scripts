@@ -147,16 +147,28 @@ fn collect(staging: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// The same ceiling `verify` applies, and for the same reason: this walks a bundle,
+/// which may have come from anywhere, and it used to recurse one stack frame per level.
+/// A crash here takes down the process serving an agent.
+const MAX_REPORT_DEPTH: usize = 64;
+
+/// Every offered artifact under `dir`.
+///
+/// `follow_links(false)` is not a detail: the previous version tested `path.is_dir()`,
+/// which **follows** symlinks — so a link pointing at an ancestor was an infinite
+/// recursion, and a link pointing outside the bundle was read from wherever it aimed.
+/// Invariant I7 says links are never followed while walking, and this is now the walk
+/// that obeys it rather than the exception to it.
 fn collect_recursively(dir: &Path, found: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    for entry in walkdir::WalkDir::new(dir)
+        .max_depth(MAX_REPORT_DEPTH)
+        .follow_links(false)
+        .into_iter()
+        .flatten()
+    {
         let path = entry.path();
-        if path.is_dir() {
-            collect_recursively(&path, found);
-        } else if is_offered(&path) {
-            found.push(path);
+        if entry.file_type().is_file() && is_offered(path) {
+            found.push(path.to_path_buf());
         }
     }
 }
