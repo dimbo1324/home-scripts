@@ -77,6 +77,55 @@ impl ExtractLimits {
             allowed,
         }
     }
+
+    fn budget(self) -> ExtractBudget {
+        ExtractBudget {
+            limits: self,
+            spent_bytes: 0,
+            spent_entries: 0,
+        }
+    }
+}
+
+/// What an [`ExtractLimits`] has left, carried **across** archives.
+///
+/// A split bundle is one logical archive delivered as many files, so its budget has to
+/// be one too. Extracting each part with a fresh `ExtractLimits::default()` meant a
+/// 50-part set could expand to 400 GiB with every individual call comfortably "within
+/// budget" — the zip-bomb ceiling simply did not apply to the composite form.
+#[derive(Debug)]
+struct ExtractBudget {
+    limits: ExtractLimits,
+    spent_bytes: u64,
+    spent_entries: usize,
+}
+
+impl ExtractBudget {
+    /// Claims `count` members up front, before anything is read.
+    fn take_entries(&mut self, archive: &Path, count: usize) -> Result<()> {
+        self.spent_entries = self.spent_entries.saturating_add(count);
+        if self.spent_entries > self.limits.max_entries {
+            return Err(ExtractLimits::exceeded(
+                archive,
+                "member-count",
+                self.limits.max_entries.to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Charges bytes actually written to disk — never a size a header claimed.
+    fn take_bytes(&mut self, archive: &Path, written: u64) -> Result<()> {
+        self.spent_bytes = self.spent_bytes.saturating_add(written);
+        if self.spent_bytes > self.limits.max_total_bytes {
+            return Err(ExtractLimits::exceeded(
+                archive,
+                "total-size",
+                self.limits.max_total_bytes.to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// [`extract_zip_safely`] with a caller-chosen budget.
@@ -84,8 +133,8 @@ pub fn extract_zip_with_limits(
     archive_path: &Path,
     destination: &Path,
     limits: ExtractLimits,
-) -> Result<u32> {
-    extract_zip_inner(archive_path, destination, limits)
+) -> Result<u64> {
+    extract_zip_inner(archive_path, destination, &mut limits.budget())
 }
 
 /// Extracts every entry of `archive_path` into `destination`, streaming file contents
@@ -96,15 +145,19 @@ pub fn extract_zip_with_limits(
 /// abort-on-first-bad-entry behavior rather than skip-and-continue. A legitimate entry
 /// written earlier in the same archive, before the bad one, stays on disk: this is the
 /// honest, ported partial-write-before-abort behavior, not a gap.
-pub fn extract_zip_safely(archive_path: &Path, destination: &Path) -> Result<u32> {
-    extract_zip_inner(archive_path, destination, ExtractLimits::default())
+pub fn extract_zip_safely(archive_path: &Path, destination: &Path) -> Result<u64> {
+    extract_zip_inner(
+        archive_path,
+        destination,
+        &mut ExtractLimits::default().budget(),
+    )
 }
 
 fn extract_zip_inner(
     archive_path: &Path,
     destination: &Path,
-    limits: ExtractLimits,
-) -> Result<u32> {
+    budget: &mut ExtractBudget,
+) -> Result<u64> {
     let file = std::fs::File::open(archive_path).map_err(|source| ArchiveError::Read {
         path: archive_path.to_path_buf(),
         source,
@@ -118,16 +171,13 @@ fn extract_zip_inner(
         source,
     })?;
 
-    if archive.len() > limits.max_entries {
-        return Err(ExtractLimits::exceeded(
-            archive_path,
-            "member-count",
-            limits.max_entries.to_string(),
-        ));
-    }
+    budget.take_entries(archive_path, archive.len())?;
 
-    let mut extracted = 0u32;
-    let mut written_total = 0u64;
+    let limits = budget.limits;
+    // Counted as `u64` and added saturatingly: a member count is bounded by the budget,
+    // but the arithmetic should not be the thing that decides that. An overflow here is
+    // a panic in debug and a wrong answer in release.
+    let mut extracted = 0u64;
     for index in 0..archive.len() {
         let mut zip_entry = archive
             .by_index(index)
@@ -193,15 +243,8 @@ fn extract_zip_inner(
                 limits.max_entry_bytes.to_string(),
             ));
         }
-        written_total = written_total.saturating_add(written);
-        if written_total > limits.max_total_bytes {
-            return Err(ExtractLimits::exceeded(
-                archive_path,
-                "total-size",
-                limits.max_total_bytes.to_string(),
-            ));
-        }
-        extracted += 1;
+        budget.take_bytes(archive_path, written)?;
+        extracted = extracted.saturating_add(1);
     }
 
     Ok(extracted)
@@ -212,10 +255,45 @@ struct ArchiveSetManifest {
     archives: Vec<String>,
 }
 
+/// How many parts one split bundle may claim to have.
+///
+/// The parts are listed in a manifest written by whoever produced the bundle, so the
+/// count is their number, not ours. A real split set is tens of parts: `build_final_archives`
+/// splits at a configured part size, and 4096 parts of even the smallest sensible size
+/// is far beyond any bundle a person actually hands over. The cap exists so a manifest
+/// cannot make this function open an unbounded number of files before the byte budget
+/// has anything to say.
+const MAX_ARCHIVE_SET_PARTS: usize = 4096;
+
 /// Reads `ARCHIVE_SET_MANIFEST.json` inside `archive_set_dir` and extracts every listed
 /// part (in manifest order) into `destination`, returning the total file count across
 /// all parts.
-pub fn restore_archive_set(archive_set_dir: &Path, destination: &Path) -> Result<u32> {
+///
+/// ## The manifest is untrusted input
+///
+/// Every caller of this function — `codepack verify`, `handoff`, and the desktop's
+/// bundle viewer — is looking at a bundle that arrived from somewhere else. The names in
+/// `archives` are therefore strings from a stranger, and `Path::join` with an absolute
+/// path discards the base entirely: an entry of `C:/Users/victim/secret.zip` would have
+/// this function open that file and unpack its contents into `destination`. `../../x.zip`
+/// reaches the same place by a different spelling. Each name now goes through
+/// [`safe_member_target`] — the same lexical check this module already applies to the
+/// names of members *inside* an archive.
+///
+/// The extraction budget spans the whole set rather than restarting per part; see
+/// [`ExtractBudget`].
+pub fn restore_archive_set(archive_set_dir: &Path, destination: &Path) -> Result<u64> {
+    restore_archive_set_with_limits(archive_set_dir, destination, ExtractLimits::default())
+}
+
+/// [`restore_archive_set`] with a caller-chosen budget. Private: the only caller that
+/// wants a different one is this module's own test for the set-wide budget, which cannot
+/// otherwise be written without fabricating gigabytes.
+fn restore_archive_set_with_limits(
+    archive_set_dir: &Path,
+    destination: &Path,
+    limits: ExtractLimits,
+) -> Result<u64> {
     let manifest_path = archive_set_dir.join("ARCHIVE_SET_MANIFEST.json");
     let manifest_bytes = std::fs::read(&manifest_path).map_err(|source| ArchiveError::Read {
         path: manifest_path.clone(),
@@ -223,10 +301,21 @@ pub fn restore_archive_set(archive_set_dir: &Path, destination: &Path) -> Result
     })?;
     let manifest: ArchiveSetManifest = serde_json::from_slice(&manifest_bytes)?;
 
-    let mut total = 0u32;
+    if manifest.archives.len() > MAX_ARCHIVE_SET_PARTS {
+        return Err(ExtractLimits::exceeded(
+            &manifest_path,
+            "archive-set-parts",
+            MAX_ARCHIVE_SET_PARTS.to_string(),
+        ));
+    }
+
+    let mut budget = limits.budget();
+    let mut total = 0u64;
     for archive_name in &manifest.archives {
-        let archive_path = archive_set_dir.join(archive_name);
-        total += extract_zip_safely(&archive_path, destination)?;
+        // Resolved against the set directory the caller named, never against whatever
+        // the manifest would like the base to be.
+        let archive_path = safe_member_target(archive_set_dir, archive_name)?;
+        total = total.saturating_add(extract_zip_inner(&archive_path, destination, &mut budget)?);
     }
     Ok(total)
 }
@@ -357,6 +446,132 @@ mod tests {
         }
         zip.finish().expect("finish the archive");
         path
+    }
+
+    // --- A split set is one archive, and its manifest comes from a stranger -----------
+    //
+    // Audit No. 8. Two independent defects in `restore_archive_set`: the budget restarted
+    // for every part, and the part names were joined to the set directory without any
+    // check at all.
+
+    /// Writes an `ARCHIVE_SET_MANIFEST.json` listing exactly the names given.
+    fn manifest_of(dir: &Path, names: &[&str]) -> PathBuf {
+        let body = serde_json::json!({ "archives": names });
+        let path = dir.join("ARCHIVE_SET_MANIFEST.json");
+        std::fs::write(&path, serde_json::to_vec(&body).unwrap()).expect("write the manifest");
+        path
+    }
+
+    /// Writes one part archive under `dir` with the given member sizes.
+    fn part_of(dir: &Path, name: &str, members: &[(&str, usize)]) -> PathBuf {
+        use std::io::Write as _;
+
+        let path = dir.join(name);
+        let file = std::fs::File::create(&path).expect("create the part");
+        let mut zip = zip::ZipWriter::new(file);
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        for (member, size) in members {
+            zip.start_file(*member, options).expect("start a member");
+            zip.write_all(&vec![b'a'; *size]).expect("write a member");
+        }
+        zip.finish().expect("finish the part");
+        path
+    }
+
+    #[test]
+    fn a_manifest_naming_an_absolute_path_is_refused() {
+        let set_dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        // A real archive, sitting somewhere the manifest has no business reaching.
+        part_of(elsewhere.path(), "secret.zip", &[("private.txt", 16)]);
+        let absolute = elsewhere.path().join("secret.zip").display().to_string();
+        manifest_of(set_dir.path(), &[absolute.as_str()]);
+        let destination = tempfile::tempdir().unwrap();
+
+        let error = restore_archive_set(set_dir.path(), destination.path())
+            .expect_err("an absolute part name discards the set directory entirely");
+        assert!(
+            matches!(error, ArchiveError::UnsafeMemberPath { .. }),
+            "{error:?}"
+        );
+        assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_manifest_climbing_out_of_the_set_directory_is_refused() {
+        let parent = tempfile::tempdir().unwrap();
+        let set_dir = parent.path().join("set");
+        std::fs::create_dir_all(&set_dir).unwrap();
+        part_of(parent.path(), "outside.zip", &[("private.txt", 16)]);
+        manifest_of(&set_dir, &["../outside.zip"]);
+        let destination = tempfile::tempdir().unwrap();
+
+        let error = restore_archive_set(&set_dir, destination.path())
+            .expect_err("`..` in a part name must be refused");
+        assert!(
+            matches!(error, ArchiveError::UnsafeMemberPath { .. }),
+            "{error:?}"
+        );
+        assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 0);
+    }
+
+    /// The budget failure the audit describes: every part passes on its own, the set
+    /// does not. Before the fix each part got a fresh allowance, so this extracted
+    /// happily.
+    #[test]
+    fn parts_that_each_fit_the_budget_can_still_exceed_it_together() {
+        let set_dir = tempfile::tempdir().unwrap();
+        for index in 0..5 {
+            part_of(
+                set_dir.path(),
+                &format!("part{index}.zip"),
+                &[("blob.txt", 1000)],
+            );
+        }
+        let names: Vec<String> = (0..5).map(|index| format!("part{index}.zip")).collect();
+        let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+        manifest_of(set_dir.path(), &borrowed);
+        let destination = tempfile::tempdir().unwrap();
+
+        // 4096 bytes total, and each part carries 1000 — the fourth part is where the
+        // set crosses the line, and no single part ever does.
+        let error =
+            restore_archive_set_with_limits(set_dir.path(), destination.path(), tiny_limits())
+                .expect_err("the budget spans the set, not one part");
+        assert!(error.to_string().contains("total-size"), "{error}");
+    }
+
+    #[test]
+    fn a_manifest_claiming_an_absurd_number_of_parts_is_refused_before_any_file_is_opened() {
+        let set_dir = tempfile::tempdir().unwrap();
+        let names: Vec<String> = (0..MAX_ARCHIVE_SET_PARTS + 1)
+            .map(|index| format!("part{index}.zip"))
+            .collect();
+        let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+        manifest_of(set_dir.path(), &borrowed);
+        let destination = tempfile::tempdir().unwrap();
+
+        let error = restore_archive_set(set_dir.path(), destination.path())
+            .expect_err("the part count is the manifest author's number, not ours");
+        assert!(error.to_string().contains("archive-set-parts"), "{error}");
+        // Not one of the named parts exists, so a refusal that came later would have
+        // surfaced as a read error instead — this proves the cap is checked first.
+        assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 0);
+    }
+
+    /// The ordinary case still works: a set of well-named parts restores.
+    #[test]
+    fn a_well_formed_set_still_restores_every_part() {
+        let set_dir = tempfile::tempdir().unwrap();
+        part_of(set_dir.path(), "part0.zip", &[("a.txt", 10)]);
+        part_of(set_dir.path(), "part1.zip", &[("nested/b.txt", 20)]);
+        manifest_of(set_dir.path(), &["part0.zip", "part1.zip"]);
+        let destination = tempfile::tempdir().unwrap();
+
+        let extracted =
+            restore_archive_set(set_dir.path(), destination.path()).expect("a normal set restores");
+        assert_eq!(extracted, 2);
+        assert!(destination.path().join("nested/b.txt").is_file());
     }
 
     fn tiny_limits() -> ExtractLimits {

@@ -137,7 +137,7 @@ fn restore_archive_set_round_trip_reproduces_every_file() {
 
     let destination = temp.path().join("restored");
     let extracted = restore_archive_set(&output_dir, &destination).expect("restore");
-    assert_eq!(extracted, result.file_count);
+    assert_eq!(extracted, u64::from(result.file_count));
 
     for relative in [
         "reports/x1.json",
