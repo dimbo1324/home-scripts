@@ -217,6 +217,19 @@ would have put the archive format in two places. Six tests cover the archive pat
 including that a staging folder still wins when it is there and that an unreadable
 archive registers nothing rather than handing out URIs that cannot be read.
 
+## A flaky test, found by re-running rather than by trusting a green run
+
+The suite was green when it was written and failed on a later run: `mcp::tests::
+resources_are_listed_and_read_over_the_protocol` reached the process-wide resource
+registry without taking the lock the `resources` tests use, so a parallel test replaced
+the registry mid-session.
+
+That is the worst way for a test to be wrong — it passed by luck, which made the green
+suite mean less than it looked like it meant. The lock moved out of the `resources` test
+module so both sides take the same one, and the binary was then run twenty times in a row
+with zero failures. The full gate is green again: eight sections, 1416 Rust tests, 78
+`scripts/` tests, frontend 137 files / 0 errors.
+
 ## Still not done, and why
 
 - [−] **Item 13, the S13 API-path UI.** Unchanged: `cargo xtask gate`'s `network
