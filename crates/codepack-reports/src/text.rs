@@ -35,10 +35,24 @@ pub(crate) fn read_text_lossy(path: &Path, max_bytes: Option<u64>) -> Option<Str
     Some(String::from_utf8_lossy(&raw).into_owned())
 }
 
+/// The largest file [`safe_read_json`] will read.
+///
+/// Every caller is reading a project manifest — `package.json`, `composer.json`, a lock
+/// file. None of those is tens of megabytes, and something that is, is not the file the
+/// caller thinks it found. Reading it whole into memory and then parsing it into a
+/// `serde_json::Value` costs several times its size again (audit No. 15).
+const MAX_JSON_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Legacy `safe_read_json`: any I/O or parse failure yields `Value::Null` rather than
 /// propagating — callers treat a missing/unreadable manifest as "no data available",
-/// not a report failure.
+/// not a report failure. A file past [`MAX_JSON_BYTES`] is treated the same way, which
+/// is why the ceiling needs no separate error path.
 pub(crate) fn safe_read_json(path: &Path) -> serde_json::Value {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.len() > MAX_JSON_BYTES => return serde_json::Value::Null,
+        // An unreadable stat is not a reason to refuse; the read below reports it.
+        _ => {}
+    }
     std::fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
@@ -48,6 +62,28 @@ pub(crate) fn safe_read_json(path: &Path) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A manifest larger than any real one is treated exactly like an unreadable file:
+    /// no data, no report failure (audit No. 15).
+    #[test]
+    fn an_absurdly_large_json_file_reads_as_no_data_rather_than_being_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("package.json");
+        let padding = " ".repeat(usize::try_from(MAX_JSON_BYTES).unwrap() + 1);
+        // Valid JSON, so nothing but the ceiling can be what refuses it.
+        std::fs::write(&path, format!("{{\"name\":\"x\"}}{padding}")).unwrap();
+
+        assert_eq!(safe_read_json(&path), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn an_ordinary_manifest_still_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("package.json");
+        std::fs::write(&path, r#"{"name":"demo"}"#).unwrap();
+
+        assert_eq!(safe_read_json(&path)["name"], "demo");
+    }
 
     #[test]
     fn read_text_lossy_returns_empty_for_empty_file() {

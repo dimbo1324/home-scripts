@@ -43,7 +43,7 @@
 //! inconsistency.
 
 use std::fs;
-use std::io::Read;
+use std::io::{BufWriter, Read};
 use std::path::{Path, PathBuf};
 
 use codepack_core::{CancellationToken, TextDumpStats};
@@ -206,6 +206,26 @@ fn count_redaction_markers(text: &str) -> u32 {
     u32::try_from(plain + labelled).unwrap_or(u32::MAX)
 }
 
+/// The largest file this step will read whole, whatever the configuration says.
+///
+/// `Config::text_file_size_limit_enabled` is `false` by default, so the user-facing limit
+/// is usually absent altogether. This one is not a preference: past this size a single
+/// file costs more memory than any dump entry is worth, and the file is far more likely
+/// to be a database or a build artifact that slipped past the text filters than something
+/// a reader wants quoted.
+const ABSOLUTE_MAX_TEXT_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Appends to the dump, naming the file in any error.
+///
+/// Every write goes through here so the `EngineError::Io` path is written once rather
+/// than at each of the dozen call sites.
+fn write_text(out: &mut BufWriter<fs::File>, output_file: &Path, text: &str) -> Result<()> {
+    std::io::Write::write_all(out, text.as_bytes()).map_err(|source| EngineError::Io {
+        path: output_file.to_path_buf(),
+        source,
+    })
+}
+
 /// Runs pipeline step 5. `max_bytes_per_file` mirrors
 /// `config.effective_max_text_file_bytes()`; `redactor` is `Some` exactly when
 /// `config.redact_secrets` is set, and carries the run's placeholder policy;
@@ -222,38 +242,78 @@ pub fn write_text_dump(
 ) -> Result<TextDumpOutcome> {
     let mut stats = TextDumpStats::default();
     let mut redacted_substitutions = 0u32;
-    let mut out = String::new();
+
+    // The walk happens before the output file exists. Streaming the dump means the file
+    // is created up front, and `output_file` normally sits inside the tree being walked —
+    // so listing afterwards would have the dump include itself. Collecting first keeps
+    // exactly the set of files the accumulating version saw.
+    let files = collect_files(root);
+
+    // Written as the walk goes rather than accumulated. The dump used to be built in one
+    // `String` and written once at the end, so peak memory was "every text file in the
+    // project, decoded, plus the largest file three times over" — against the project's
+    // own rule that memory must not grow with file size, and on the desktop a crash in
+    // the middle of a long operation (audit No. 15).
+    //
+    // Nothing in the header depends on the body, so the order the file is written in is
+    // the order it is produced. `prepend_developer_context` still rewrites the file
+    // afterwards, unchanged.
+    let handle = fs::File::create(output_file).map_err(|source| EngineError::Io {
+        path: output_file.to_path_buf(),
+        source,
+    })?;
+    let mut out = BufWriter::new(handle);
 
     let root_name = root
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    out.push_str("=== Text Files Dump ===\n");
-    out.push_str(&format!("Project copy root name: {root_name}\n"));
-    out.push_str(&format!("Generated: {}\n", human_now_utc()));
-    out.push_str(&format!(
-        "Max bytes per file: {}\n",
-        max_bytes_per_file
-            .map(format_thousands)
-            .unwrap_or_else(|| "unlimited".to_string())
-    ));
-    out.push_str(&format!(
-        "Secrets redaction: {}\n",
-        match redactor {
-            // Said out loud so a reader meeting `<REDACTED:s1>` for the first time knows
-            // it is a label for one particular secret and not part of the value.
-            Some(redactor) if redactor.is_labelled() =>
-                "enabled, with a stable label per distinct secret (<REDACTED:sN>)",
-            Some(_) => "enabled",
-            None => "disabled",
-        }
-    ));
-    out.push_str("Only readable text-like files are included.\n");
-    out.push_str(&section_rule('='));
-    out.push_str("\n\n");
+    write_text(&mut out, output_file, "=== Text Files Dump ===\n")?;
+    write_text(
+        &mut out,
+        output_file,
+        &format!("Project copy root name: {root_name}\n"),
+    )?;
+    write_text(
+        &mut out,
+        output_file,
+        &format!("Generated: {}\n", human_now_utc()),
+    )?;
+    write_text(
+        &mut out,
+        output_file,
+        &format!(
+            "Max bytes per file: {}\n",
+            max_bytes_per_file
+                .map(format_thousands)
+                .unwrap_or_else(|| "unlimited".to_string())
+        ),
+    )?;
+    write_text(
+        &mut out,
+        output_file,
+        &format!(
+            "Secrets redaction: {}\n",
+            match redactor {
+                // Said out loud so a reader meeting `<REDACTED:s1>` for the first time
+                // knows it is a label for one particular secret, not part of the value.
+                Some(redactor) if redactor.is_labelled() =>
+                    "enabled, with a stable label per distinct secret (<REDACTED:sN>)",
+                Some(_) => "enabled",
+                None => "disabled",
+            }
+        ),
+    )?;
+    write_text(
+        &mut out,
+        output_file,
+        "Only readable text-like files are included.\n",
+    )?;
+    write_text(&mut out, output_file, &section_rule('='))?;
+    write_text(&mut out, output_file, "\n\n")?;
 
-    for path in collect_files(root) {
+    for path in files {
         if cancel.is_cancelled() {
             break;
         }
@@ -272,10 +332,27 @@ pub fn write_text_dump(
             }
         };
 
+        // The user's own ceiling, which is off by default.
         if let Some(max) = max_bytes_per_file
             && metadata.len() > max
         {
             stats.skipped_large += 1;
+            continue;
+        }
+        // And a ceiling no configuration can switch off. `text_file_size_limit_enabled`
+        // defaults to `false`, so without this a single enormous file is read whole,
+        // decoded, redacted and held in memory several times over. Counted as
+        // `skipped_large` — which is what it is — rather than as a new statistic, because
+        // `TextDumpStats` is part of `manifest.json` and I5 makes that a contract.
+        if metadata.len() > ABSOLUTE_MAX_TEXT_FILE_BYTES {
+            stats.skipped_large += 1;
+            log(&format!(
+                "text dump: {} skipped — {} bytes is past the {} byte ceiling that applies \
+                 regardless of settings",
+                rel_display(&path, root),
+                format_thousands(metadata.len()),
+                format_thousands(ABSOLUTE_MAX_TEXT_FILE_BYTES)
+            ));
             continue;
         }
 
@@ -314,37 +391,37 @@ pub fn write_text_dump(
             .unwrap_or_default();
         let display = rel_display(&path, root);
 
-        out.push('\n');
-        out.push_str(&file_banner_rule());
-        out.push('\n');
-        out.push_str(&format!("File: {display}\n"));
-        out.push_str(&format!(
-            "Name: {}\n",
-            path.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        ));
-        out.push_str(&format!(
-            "Size: {} bytes\n",
-            format_thousands(metadata.len())
-        ));
-        out.push_str(&format!("Modified: {modified}\n"));
-        out.push_str(&format!("Encoding: {encoding}\n"));
-        out.push_str(&file_banner_rule());
-        out.push_str("\n\n");
-        out.push_str(&text);
+        let banner = file_banner_rule();
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        write_text(
+            &mut out,
+            output_file,
+            &format!(
+                "\n{banner}\nFile: {display}\nName: {name}\nSize: {} bytes\nModified: \
+                 {modified}\nEncoding: {encoding}\n{banner}\n\n",
+                format_thousands(metadata.len())
+            ),
+        )?;
+        write_text(&mut out, output_file, &text)?;
         if !text.ends_with('\n') {
-            out.push('\n');
+            write_text(&mut out, output_file, "\n")?;
         }
 
         stats.written += 1;
         log(&format!("text dump: {display}"));
     }
 
-    fs::write(output_file, &out).map_err(|source| EngineError::Io {
+    // Explicitly, rather than on drop: a `BufWriter` that fails to flush while being
+    // dropped has nowhere to report it, and a silently truncated dump would look like a
+    // complete one.
+    std::io::Write::flush(&mut out).map_err(|source| EngineError::Io {
         path: output_file.to_path_buf(),
         source,
     })?;
+    drop(out);
 
     let trimmed_context = developer_context.trim();
     if !trimmed_context.is_empty() {
@@ -362,6 +439,69 @@ mod tests {
     use super::*;
 
     fn no_log(_: &str) {}
+
+    /// The dump is written as the walk goes, so a file created while walking must not
+    /// end up quoting itself. The output normally sits inside the tree being dumped.
+    #[test]
+    fn the_dump_does_not_include_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.py"),
+            "print('hello')
+",
+        )
+        .unwrap();
+        let output = dir.path().join("dump.txt");
+
+        let outcome = write_text_dump(
+            dir.path(),
+            &output,
+            None,
+            Some(&codepack_security::Redactor::plain()),
+            "",
+            &no_log,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.stats.written, 1);
+        let body = fs::read_to_string(&output).unwrap();
+        assert!(!body.contains("File: dump.txt"), "{body}");
+    }
+
+    /// The dump is streamed, so what lands on disk has to be flushed rather than left in
+    /// a buffer — a truncated dump would look like a complete one.
+    #[test]
+    fn a_dump_larger_than_one_buffer_is_written_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        // Comfortably past BufWriter's default 8 KiB.
+        let body = "x = 1  # padding
+"
+        .repeat(4000);
+        fs::write(dir.path().join("big.py"), &body).unwrap();
+        let output = dir.path().join("dump.txt");
+
+        write_text_dump(
+            dir.path(),
+            &output,
+            None,
+            None,
+            "",
+            &no_log,
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+        let written = fs::read_to_string(&output).unwrap();
+        assert!(written.len() > body.len(), "{}", written.len());
+        assert!(
+            written.ends_with(
+                "x = 1  # padding
+"
+            ),
+            "the tail must be there"
+        );
+    }
 
     #[test]
     fn a_binary_file_is_skipped_and_counted() {
