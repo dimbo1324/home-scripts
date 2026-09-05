@@ -37,50 +37,82 @@ Measured rather than assumed. Cleared, and therefore **not touched**:
 
 ## Preparation
 
-- [ ] Branch from up-to-date `main`, commit this checklist before the work
+- [+] Branch from up-to-date `main`, commit this checklist before the work
 
 ## 1 — Security: a decompression bomb has nothing stopping it
 
-- [ ] `extract_zip_safely` streams every member with `std::io::copy` and no ceiling, and
+- [+] `extract_zip_safely` streams every member with `std::io::copy` and no ceiling, and
       `codepack verify` feeds it an archive that came from somebody else — the one input
       in this product that is untrusted by design. A small archive expanding to hundreds
       of gigabytes fills the disk.
-- [ ] Add a budget: total decompressed bytes, per-member bytes, and member count. Fail
+- [+] Add a budget: total decompressed bytes, per-member bytes, and member count. Fail
       closed, naming the limit that was hit.
-- [ ] Keep `extract_zip_safely`'s signature so no caller breaks; the limits are a value
+- [+] Keep `extract_zip_safely`'s signature so no caller breaks; the limits are a value
       with a `Default`, and a caller that needs different ones passes them.
-- [ ] `read_zip_entry_to_string` gets the same per-member ceiling.
+- [+] `read_zip_entry_to_string` gets the same per-member ceiling.
 
 ## 2 — Two modules genuinely past the project's own 600-line limit
 
 Both were pushed over the line by the previous task, so this is cleaning up after it.
 
-- [ ] `codepack-cli/src/commands/scan.rs` (757 production lines) -> directory module
-- [ ] `codepack-security/src/scan/mod.rs` (748) -> split by responsibility
-- [ ] The public surface of each stays exactly as it is: this is code movement, not an
+- [+] `codepack-cli/src/commands/scan.rs` (757 production lines) -> directory module
+- [+] `codepack-security/src/scan/mod.rs` (748) -> split by responsibility
+- [+] The public surface of each stays exactly as it is: this is code movement, not an
       API change.
 
 ## 3 — Encapsulation: production API widened for tests
 
-- [ ] `codepack_engine::explain` exports five helpers (`default_reason`,
+- [+] `codepack_engine::explain` exports five helpers (`default_reason`,
       `relative_to_project`, `resolve_through_existing_ancestor`, `plan_spelling`,
       `skipped_directory_on_path`) that nothing outside the crate legitimately needs —
       they are `pub` only because CLI tests reach them. Also from the previous task.
-- [ ] Narrow them, and move the tests that exercise them into the crate that owns them.
+- [+] Narrow them, and move the tests that exercise them into the crate that owns them.
 
 ## 4 — One `unwrap` without the justification the rules require
 
-- [ ] `xtask/src/sync_agents.rs`: `path.file_name().unwrap()`. The rule allows `unwrap`
+- [+] `xtask/src/sync_agents.rs`: `path.file_name().unwrap()`. The rule allows `unwrap`
       only "where the invariant is proven by an adjacent comment". Restructure so the
       name is never an `Option` rather than adding a comment to excuse it.
 
 ## Verification
 
-- [ ] `cargo xtask gate` green
-- [ ] The refactor is behaviour-preserving: the same tests that passed before pass after,
-      without being rewritten to match new behaviour
+- [+] `cargo xtask gate` green — all eight sections, exit 0. 1424 Rust tests across 56
+      binaries, `cargo deny` clean, frontend 137 files / 0 errors, 78 `scripts/` tests,
+      `AGENTS.md` in sync, network isolation ok
+- [+] The refactor is behaviour-preserving: every test that passed before passes after,
+      and none was rewritten to match new behaviour. Eight tests were *added*, all for
+      the decompression budget, which is new behaviour by design
+- [+] `cargo xtask sync-agents --check` still reports `AGENTS.md` byte-identical after
+      the xtask change, which is what makes that one a refactor rather than a change
+- [+] Module sizes re-measured afterwards: no production module is over the limit; the
+      only files above it are test files, which the rules exempt
+
+## Also audited and deliberately left alone
+
+Reported so the next reader knows these were checked rather than skipped:
+
+- **The desktop shell.** The webview holds no filesystem, shell or HTTP permission; the
+  CSP is `default-src 'self'` with no remote origin; lock poisoning is handled everywhere
+  (`.lock().unwrap()` appears nowhere) and two tests prove the registry survives a thread
+  panicking while holding it.
+- **HTML generation.** `escape_html` is applied at every interpolation in `dashboard.rs`
+  and `overview.rs`.
+- **The frontend.** No `any`, no `@ts-ignore`, no non-null assertions.
+- **Path traversal.** Two independent checks per member, failing closed.
+- **`verify.rs`, `mcp/mod.rs`, `mcp/tools.rs`, `git_report.rs`** — all under the limit
+  once inline tests are excluded, so splitting them would have been churn.
+
+## Not done, and why
+
+- **No OO rewrite.** Rust has no class hierarchies, and adding trait objects where a
+  concrete type is correct would cost indirection and readability for nothing. The
+  seams that genuinely deserve an interface already have one.
+- **No behaviour changed** anywhere except the new extraction ceiling, which is the point
+  of item 1.
 
 ## Completion
 
-- [ ] Checklist filled with `+`/`-`
-- [ ] Final report in Russian
+- [+] Checklist filled with `+`/`-`
+- [+] Final report in Russian
+- [-] Not merged or pushed: no publish was requested for this branch. The gate is green,
+      so the merge is available on request.
