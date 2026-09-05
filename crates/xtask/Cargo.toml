@@ -14,6 +14,9 @@ publish.workspace = true
 # authentic, is not a trade worth making.
 [dependencies]
 sha2.workspace = true
+# Audit No. 5: the isolation check parses manifests properly now. A hand-rolled line
+# reader was what let `[dependencies.reqwest]` past it.
+toml.workspace = true
 
 # Test-only: the checksum writer's tests need a throwaway bundle directory.
 [dev-dependencies]
