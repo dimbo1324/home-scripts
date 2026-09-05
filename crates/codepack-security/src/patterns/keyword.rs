@@ -7,7 +7,7 @@
 //! span finders rather than restating the shapes.
 
 use crate::patterns::keyword_scan::{
-    self, REDACT_ROOTS, assignment_roots, contains_root, find_keyword_assignments, scan_roots,
+    self, ASSIGNMENT_ROOTS, REDACT_ROOTS, SCAN_ROOTS, contains_root, find_keyword_assignments,
 };
 use crate::pseudonym::Placeholders;
 
@@ -30,14 +30,14 @@ fn has_secret_with_value(line: &str) -> bool {
 /// Legacy `SECRET_KEY_PATTERN`: a bare keyword mention, no value shape required. A line
 /// matching this — outside a comment — yields `low` confidence.
 pub(crate) fn mentions_scan_keyword(line: &str) -> bool {
-    contains_root(line, &scan_roots())
+    contains_root(line, &SCAN_ROOTS)
 }
 
 /// Legacy `_ASSIGNMENT_SECRET_RE`: a secret-shaped key immediately followed by `:`/`=`,
 /// with no requirement on the value itself — deliberately looser than
 /// [`has_secret_with_value`], yielding `medium` confidence.
 pub(crate) fn has_secret_assignment(line: &str) -> bool {
-    keyword_scan::has_assignment_operator_after_root(line, &assignment_roots())
+    keyword_scan::has_assignment_operator_after_root(line, &ASSIGNMENT_ROOTS)
 }
 
 /// Legacy `_PRIVATE_KEY_RE`: a PEM private-key header. The single `critical`-tier

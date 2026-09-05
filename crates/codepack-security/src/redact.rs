@@ -58,7 +58,7 @@
 
 use crate::patterns::keyword::{KeySpacing, redact_value_after_separator};
 use crate::patterns::keyword_scan::{
-    contains_root, find_bearer_tokens, find_keyword_assignments, scan_roots, skip_spaces,
+    SCAN_ROOTS, contains_root, find_bearer_tokens, find_keyword_assignments, skip_spaces,
 };
 use crate::patterns::{credentials, prefilter, provider};
 use crate::pseudonym::Placeholders;
@@ -81,7 +81,7 @@ use crate::pseudonym::Placeholders;
 /// the project's owner may never open, and it would be triggered by files entropy was
 /// never asked to police (arbitrary text, other people's source).
 fn find_redaction_spans(line: &str) -> Vec<(usize, usize)> {
-    let mut spans = find_keyword_assignments(line, &scan_roots());
+    let mut spans = find_keyword_assignments(line, &SCAN_ROOTS);
     spans.extend(find_compound_keyword_assignments(line));
     spans.extend(find_bearer_tokens(line));
     spans.extend(credentials::find_http_auth_tokens(line));
@@ -126,7 +126,7 @@ fn find_redaction_spans(line: &str) -> Vec<(usize, usize)> {
 /// Segment-wise rather than substring, so `TOKENIZER=…` is left alone while
 /// `NPM_TOKEN=…` and `AWS_SECRET_ACCESS_KEY=…` are masked.
 fn find_compound_keyword_assignments(line: &str) -> Vec<(usize, usize)> {
-    let roots = scan_roots();
+    let roots = &*SCAN_ROOTS;
     let bytes = line.as_bytes();
     let mut spans = Vec::new();
     let mut index = 0usize;
@@ -153,7 +153,7 @@ fn find_compound_keyword_assignments(line: &str) -> Vec<(usize, usize)> {
         if !compounded
             || !name
                 .split(['_', '-'])
-                .any(|segment| !segment.is_empty() && contains_root(segment, &roots))
+                .any(|segment| !segment.is_empty() && contains_root(segment, roots))
         {
             continue;
         }
@@ -355,9 +355,9 @@ fn split_leading_assignment(text: &str) -> Option<(&str, &str)> {
 /// Segment-wise rather than substring: `TOKENIZER` must not match, while `NPM_TOKEN` and
 /// `AWS_SECRET_ACCESS_KEY` must.
 fn name_carries_keyword_root(name: &str) -> bool {
-    let roots = scan_roots();
+    let roots = &*SCAN_ROOTS;
     name.split(['_', '-'])
-        .any(|segment| !segment.is_empty() && contains_root(segment, &roots))
+        .any(|segment| !segment.is_empty() && contains_root(segment, roots))
 }
 
 #[cfg(test)]

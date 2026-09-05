@@ -21,6 +21,7 @@
 //! separator rule is applied by the matcher instead of being spelled into each pattern.
 //! The three sets are then defined by composition, so the containment is structural and
 //! cannot rot.
+use std::sync::LazyLock;
 
 /// One keyword root: the words it is written with, in order.
 ///
@@ -55,22 +56,29 @@ const SCAN_ONLY_ROOTS: &[KeywordRoot] = &[
 const ASSIGNMENT_ONLY_ROOTS: &[KeywordRoot] = &[&["DATABASE", "URL"], &["JWT", "SECRET"]];
 
 /// Every root the scanner looks for. Legacy `_SCAN_KEYWORDS`.
-pub(crate) fn scan_roots() -> Vec<KeywordRoot> {
+///
+/// Built once. These are read on the hottest path there is — once per line of every file
+/// scanned and every file redacted — and they used to be rebuilt into a fresh `Vec` at
+/// each of those calls: two or three heap allocations per line, millions of them on a
+/// large project, and allocator pressure from every rayon thread at once (audit No. 16).
+/// The same `LazyLock` shape `PROVIDER_PATTERNS` and `AUTOMATON` already use in this
+/// module's neighbour.
+pub(crate) static SCAN_ROOTS: LazyLock<Vec<KeywordRoot>> = LazyLock::new(|| {
     REDACT_ROOTS
         .iter()
         .chain(SCAN_ONLY_ROOTS)
         .copied()
         .collect()
-}
+});
 
 /// Every root the `medium`-confidence assignment rule looks for.
-pub(crate) fn assignment_roots() -> Vec<KeywordRoot> {
+pub(crate) static ASSIGNMENT_ROOTS: LazyLock<Vec<KeywordRoot>> = LazyLock::new(|| {
     REDACT_ROOTS
         .iter()
         .chain(ASSIGNMENT_ONLY_ROOTS)
         .copied()
         .collect()
-}
+});
 
 /// A word character, matching the `\w` the `\b` assertions were defined against.
 fn is_word_char(character: char) -> bool {
@@ -356,8 +364,8 @@ mod tests {
     #[test]
     fn the_longest_root_wins_at_a_shared_position() {
         // `JWT_SECRET` must not be reported as the bare `SECRET` inside it.
-        let roots = scan_roots();
-        let (start, end) = find_root("JWT_SECRET=x", &roots).expect("root found");
+        let roots = &*SCAN_ROOTS;
+        let (start, end) = find_root("JWT_SECRET=x", roots).expect("root found");
         assert_eq!(&"JWT_SECRET=x"[start..end], "JWT_SECRET");
     }
 
@@ -365,7 +373,7 @@ mod tests {
     fn scan_roots_contain_every_redact_root_by_construction() {
         // This replaces a test that asserted one regex-source string started with
         // another; containment is now structural rather than copy-pasted.
-        let scan = scan_roots();
+        let scan = &*SCAN_ROOTS;
         for root in REDACT_ROOTS {
             assert!(scan.contains(root), "scan set is missing {root:?}");
         }
@@ -374,7 +382,7 @@ mod tests {
 
     #[test]
     fn assignment_roots_are_narrower_than_scan_roots_exactly_as_legacy_had_them() {
-        let assignment = assignment_roots();
+        let assignment = &*ASSIGNMENT_ROOTS;
         // Legacy's assignment pattern listed database_url and jwt_secret but not
         // access_key or client_secret.
         assert!(assignment.contains(&(&["DATABASE", "URL"] as KeywordRoot)));
@@ -385,9 +393,9 @@ mod tests {
 
     #[test]
     fn finds_the_leftmost_root() {
-        let roots = scan_roots();
+        let roots = &*SCAN_ROOTS;
         let line = "pass then token";
-        let (start, end) = find_root(line, &roots).expect("root found");
+        let (start, end) = find_root(line, roots).expect("root found");
         assert_eq!(&line[start..end], "pass");
     }
 
@@ -512,7 +520,7 @@ mod tests {
             "ключTOKEN",
         ];
 
-        let scan = scan_roots();
+        let scan = &*SCAN_ROOTS;
         for (source, roots) in [(redact_source, REDACT_ROOTS), (scan_source, &scan[..])] {
             let regex = regex::Regex::new(source).expect("reference pattern must compile");
             for line in corpus {

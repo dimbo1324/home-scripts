@@ -56,6 +56,7 @@
 //! codepack bundle has no recognisable generated paths, so all of it is content — the
 //! safe direction.
 
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use codepack_core::CancellationToken;
@@ -295,10 +296,15 @@ fn assemble(
     depth_truncated: bool,
     screened: &crate::allow::Screened,
 ) -> VerifyReport {
+    // Every line the findings point at, read in one pass over the files rather than one
+    // pass per finding.
+    let lines = bundle_lines(root, screened.findings.iter());
     let (generated, content): (Vec<_>, Vec<_>) = screened.findings.iter().partition(|finding| {
         is_generated_artifact(&finding.file)
-            || bundle_line(root, &finding.file, finding.line)
-                .is_some_and(|line| is_not_credential_shaped(&line))
+            || finding
+                .line
+                .and_then(|line| lines.get(&(finding.file.clone(), line)))
+                .is_some_and(|line| is_not_credential_shaped(line))
     });
 
     let critical = content
@@ -420,15 +426,66 @@ fn is_not_credential_shaped(raw_line: &str) -> bool {
 ///
 /// A file that cannot be read yields `None`, which classifies the finding as content —
 /// the safe direction, since an unreadable line is not evidence that redaction worked.
-fn bundle_line(root: &Path, file: &str, line: Option<usize>) -> Option<String> {
-    let line = line?;
-    let relative: PathBuf = file
-        .replace('\\', "/")
+fn bundle_relative(file: &str) -> PathBuf {
+    file.replace('\\', "/")
         .trim_start_matches("./")
         .split('/')
-        .collect();
-    let text = std::fs::read_to_string(root.join(relative)).ok()?;
-    text.lines().nth(line.checked_sub(1)?).map(str::to_string)
+        .collect()
+}
+
+/// Every `(file, line)` a finding points at, read with **one pass per file**.
+///
+/// This used to be one `read_to_string` of the whole file per finding: a bundle with a
+/// hundred findings in one 50 MB file meant five gigabytes of reading and a hundred full
+/// copies of it (audit No. 14). `verify` looks at bundles that arrived from elsewhere, so
+/// a quadratic path there is something a sender can aim on purpose.
+///
+/// Streamed line by line rather than read whole, so a file does not have to fit in memory
+/// at all — only the handful of lines actually asked about.
+///
+/// A line that cannot be read is simply absent from the map, which keeps the existing and
+/// deliberate behaviour: a finding whose line cannot be checked counts as content, the
+/// safe direction, since an unreadable line is not evidence that redaction worked.
+fn bundle_lines<'a>(
+    root: &Path,
+    findings: impl Iterator<Item = &'a codepack_security::Finding>,
+) -> HashMap<(String, usize), String> {
+    let mut wanted: HashMap<String, BTreeSet<usize>> = HashMap::new();
+    for finding in findings {
+        if let Some(line) = finding.line {
+            wanted.entry(finding.file.clone()).or_default().insert(line);
+        }
+    }
+
+    let mut lines = HashMap::new();
+    for (file, numbers) in wanted {
+        let Ok(handle) = std::fs::File::open(root.join(bundle_relative(&file))) else {
+            continue;
+        };
+        let mut reader = std::io::BufReader::new(handle);
+        let mut current = 0usize;
+        let mut buffer = String::new();
+        // `numbers` is ordered, so one forward pass answers all of them.
+        for wanted_line in numbers {
+            while current < wanted_line {
+                buffer.clear();
+                match std::io::BufRead::read_line(&mut reader, &mut buffer) {
+                    Ok(0) => break,
+                    Ok(_) => current += 1,
+                    // Not valid UTF-8, or unreadable: the rest of this file is skipped,
+                    // and the affected findings count as content.
+                    Err(_) => break,
+                }
+            }
+            if current == wanted_line {
+                lines.insert(
+                    (file.clone(), wanted_line),
+                    buffer.trim_end_matches(['\n', '\r']).to_string(),
+                );
+            }
+        }
+    }
+    lines
 }
 
 /// True when a bundle-relative path is a file codepack itself generated from
@@ -529,6 +586,73 @@ fn print_findings(findings: &[ReportedFinding]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn finding_at(file: &str, line: Option<usize>) -> codepack_security::Finding {
+        codepack_security::Finding {
+            kind: FindingKind::PotentialSecret,
+            severity: "high".to_string(),
+            confidence: "medium".to_string(),
+            file: file.to_string(),
+            line,
+            rule: "test".to_string(),
+            message: "test".to_string(),
+        }
+    }
+
+    /// Several findings in one file, and one in a file that is not there. The map has to
+    /// answer each of them from a single forward pass, and the missing file must simply
+    /// be absent — a finding whose line cannot be read counts as content, which is the
+    /// safe direction.
+    #[test]
+    fn every_wanted_line_is_answered_from_one_pass_over_each_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.txt", "one\ntwo\nthree\nfour\n");
+
+        let findings = [
+            finding_at("a.txt", Some(3)),
+            finding_at("a.txt", Some(1)),
+            finding_at("a.txt", Some(4)),
+            finding_at("gone.txt", Some(2)),
+            // A finding with no line at all contributes nothing to read.
+            finding_at("a.txt", None),
+        ];
+
+        let lines = bundle_lines(dir.path(), findings.iter());
+
+        assert_eq!(lines.get(&("a.txt".to_string(), 1)).unwrap(), "one");
+        assert_eq!(lines.get(&("a.txt".to_string(), 3)).unwrap(), "three");
+        assert_eq!(lines.get(&("a.txt".to_string(), 4)).unwrap(), "four");
+        assert!(!lines.contains_key(&("gone.txt".to_string(), 2)));
+        assert_eq!(lines.len(), 3);
+    }
+
+    /// A line number past the end of the file yields nothing rather than a wrong line.
+    #[test]
+    fn a_line_past_the_end_of_a_file_is_absent_rather_than_wrong() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "short.txt", "only one line\n");
+
+        let findings = [finding_at("short.txt", Some(9))];
+        let lines = bundle_lines(dir.path(), findings.iter());
+
+        assert!(lines.is_empty());
+    }
+
+    /// Findings name paths with backslashes and a leading `.\`; the reader has to
+    /// normalise them the same way the rest of this module does.
+    #[test]
+    fn a_windows_spelled_finding_path_still_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/deep/a.txt", "target line\n");
+
+        let findings = [finding_at(r".\src\deep\a.txt", Some(1))];
+        let lines = bundle_lines(dir.path(), findings.iter());
+
+        assert_eq!(
+            lines.get(&(r".\src\deep\a.txt".to_string(), 1)).unwrap(),
+            "target line"
+        );
+    }
 
     /// A tree deeper than the ceiling is walked without dying, and the report says the
     /// check was incomplete. Silence here would be the worst outcome available: a clean
