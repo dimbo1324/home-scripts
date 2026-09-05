@@ -5,6 +5,7 @@
 //! were the larger half. Same remedy already applied to `commands/export.rs`.
 
 use super::*;
+use std::fs;
 use std::io::Write;
 
 fn write_file(dir: &Path, relative: &str, content: &str) -> PathBuf {
