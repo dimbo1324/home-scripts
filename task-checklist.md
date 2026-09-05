@@ -150,18 +150,86 @@ records in `docs/__arch__/open-questions.md` for the decisions this task acts on
 
 ## Verification
 
+Tests and runs were added on 2026-09-05, after the owner lifted the earlier restriction.
+
 - [+] `cargo check --workspace --all-targets` clean
 - [+] `cargo clippy --workspace --all-targets -- -D warnings` clean
 - [+] `cargo xtask fmt` applied
-- [+] `pnpm --filter @codepack/ui typecheck` — 137 files, 0 errors; `lint` clean
-- [−] **The test suite was not run and the gate was not run**, by owner instruction. This
-      change touches the scanner's ordering, the report runner's concurrency and the MCP
-      loop's structure — three places where only execution can confirm the reasoning. The
-      work is not verified, and is not claimed to be
+- [+] **`cargo xtask gate` green — all eight sections.** 1416 Rust tests across 56 test
+      binaries, `cargo deny` clean, frontend format/typecheck (137 files, 0 errors)/lint,
+      78 `scripts/` tests, `AGENTS.md` in sync (29.9 KiB), network isolation ok
+- [+] 128 new tests, covering every piece of behaviour this branch added:
+      - `codepack-security`: 194 → 238. Parallel ordering (repeated runs byte-identical,
+        including paths whose sort keys tie), the redactor and the cache options,
+        CRC-32 against the standard's own check value, the strict-checksum verdicts,
+        allowlist screening, cache keys and encoding
+      - `codepack-storage`: 23 → 31. Round trip, replace-on-rewrite, least-recently-used
+        pruning, and the content cache outliving the project tables
+      - `codepack-reports`: 169 → 182. The parallel runner against the sequential one,
+        error files, profile gating, cancellation, summary folding, artifact language
+      - `codepack-engine`: explain (9 new) and the pipeline (6 → 12: the allowlist in the
+        bundle, a malformed one failing the run, cache reuse, an edit defeating the
+        cache, labels reaching `06_security_scan.json` and not reaching it by default)
+      - `codepack-cli`: baseline (8), strict hook (4), MCP loop and resources (23),
+        end-to-end `scan --baseline` and `init --strict` (8)
+      - `codepack-desktop`: 76 → 80, including one asserting the app and the engine give
+        the same verdict for the same file
+      - `xtask`: 15 → 22, checksum format, sorting, self-exclusion
+- [+] Three existing assertions updated to behaviour that deliberately changed, each
+      keeping its original meaning: the MCP capability declaration, the unknown-method
+      example (`resources/list` is implemented now), and the database's schema version —
+      the last two rewritten to derive from `MIGRATIONS` rather than a literal, so the
+      next migration cannot leave them passing while claiming a version that is not there
+
+## Runs against the real product
+
+- [+] `codepack doctor`, `scan`, `explain` (included / excluded / absent), and a full
+      `export` on a throwaway project — 33 reports succeeded, 0 failed
+- [+] `scan --write-baseline` then `--baseline`: the three recorded findings held back
+      and the exit code fell from 3 to 0; a newly added credential still got through
+- [+] `init --hook --strict`: the installed hook refuses a commit it cannot check
+- [+] Q34 confirmed in a produced archive: `06_security_scan.json` carries
+      `DATABASE_URL=<REDACTED:s2>`, `schema_version` still `1.0`, no secret value present
+- [+] The scan cache filled on an unlabelled export and stayed empty on a labelled one,
+      which is the documented behaviour rather than a fault
+- [+] A real `codepack mcp` session over pipes: handshake, `tools/list`, `explain`,
+      `export`, `resources/list`, `resources/read`, and a refused unregistered URI. Every
+      line on stdout was valid JSON-RPC
 
 ## Completion
 
 - [+] Checklist filled with `+`/`-`
-- [−] Not merged to `main` and not pushed: no publish was requested, and the quality gate
-      has not been run
 - [+] Final report in Russian
+- [−] Not merged to `main` and not pushed: no publish was requested. The gate is green,
+      so the merge is available on request.
+
+## Defect found by running, and fixed
+
+`resources/list` came back empty after every ordinary export. The MCP export tool
+registered resources from the run's staging folder, and a default run deletes that folder
+as soon as the archive is written — so the registry was built from a directory that no
+longer existed. No test caught it because every test kept its fixture on disk.
+
+Resources are now registered from the produced archive when the folder is gone, and read
+straight out of it. The zip reading went into `codepack-archive`, which owns the format;
+`codepack-cli` carries `zip` as a test dependency only, and reaching for it in production
+would have put the archive format in two places. Six tests cover the archive path,
+including that a staging folder still wins when it is there and that an unreadable
+archive registers nothing rather than handing out URIs that cannot be read.
+
+## Still not done, and why
+
+- [−] **Item 13, the S13 API-path UI.** Unchanged: `cargo xtask gate`'s `network
+      isolation` step fails when a dependent crate enables `codepack-ai`'s `api` feature,
+      which is the mechanism enforcing invariant I1. Needs an owner decision.
+- [−] **Item 11's translations.** The mechanism is wired and tested; the other ~29
+      reports are still English-only. Writing several hundred technical strings in
+      Russian without review would put unverified text into a product surface.
+- [−] Fuzzing the archive-extraction and tree-sitter paths. Not written: it is a
+      different kind of test with its own tooling (`cargo-fuzz`), and it belongs in its
+      own task rather than being bolted onto this one.
+- [−] README screenshots (Q33), the `deny.toml` gtk ignores, the `AGENTS.md` size budget
+      (Q22), and the Linux/macOS gate diagnosis (Q21) — all out of this task's scope.
+- [−] **Coverage was not measured.** No coverage tool is configured in this repository,
+      and none was added. "100% of the project" is not claimed and would not be true:
+      what is covered is every behaviour this branch introduced or changed.
