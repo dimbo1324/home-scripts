@@ -392,3 +392,269 @@ fn a_pre_cancelled_run_still_writes_the_manifest_and_archive_and_records_the_att
         "a cancelled run must never insert a snapshot row"
     );
 }
+
+// --- The allowlist and the scan cache in the pipeline (2026-09-05) ---------------------
+
+/// A project whose secret is *inside* a file the export keeps, so the finding survives
+/// into the bundle and the allowlist has something to act on. A bare `.env` would not
+/// do: safe mode drops it before the scanner ever looks.
+fn project_with_a_reported_secret(source: &Path) {
+    fs::write(source.join("main.py"), "print('hello')\n").unwrap();
+    fs::write(
+        source.join("settings.py"),
+        "DATABASE_URL = \"postgres://user:hunter2hunter2@db.internal/app\"\n",
+    )
+    .unwrap();
+    init_git_repo(source);
+}
+
+fn run_once(
+    source: &Path,
+    output: &Path,
+    conn: &mut codepack_storage::Connection,
+) -> codepack_engine::ExportOutcome {
+    let config = Config {
+        // Keep the staging folder so a test can read the reports the run wrote.
+        keep_staging_folder: true,
+        ..Config::default()
+    };
+    let cancel = CancellationToken::new();
+    let (tx, _rx) = codepack_core::progress_channel();
+    let outcome = run_export(conn, source, output, &config, &HashMap::new(), &tx, &cancel).unwrap();
+    drop(tx);
+    outcome
+}
+
+fn fingerprint_of_first_finding(outcome: &codepack_engine::ExportOutcome) -> String {
+    let analytics = outcome.analytics.as_ref().expect("step 6 ran");
+    let finding = analytics
+        .scan_result
+        .findings
+        .first()
+        .expect("the fixture must produce a finding");
+    codepack_security::allow::fingerprint_of(finding)
+}
+
+/// Q26: the file used to be honoured by `scan` and `verify` while the bundle went on
+/// reporting what a team had already accepted.
+#[test]
+fn the_export_pipeline_honours_codepack_allow() {
+    let source = tempfile::tempdir().unwrap();
+    project_with_a_reported_secret(source.path());
+    let output = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let mut conn = codepack_storage::open(&db_dir.path().join("codepack.db")).unwrap();
+
+    // First run: nothing is accepted yet, so the finding is reported.
+    let before = run_once(source.path(), output.path(), &mut conn);
+    let before_count = before
+        .analytics
+        .as_ref()
+        .unwrap()
+        .scan_result
+        .findings
+        .len();
+    assert!(before_count > 0, "the fixture must produce a finding");
+    let accepted = fingerprint_of_first_finding(&before);
+
+    // Now the team accepts it, in the source project where the file belongs.
+    fs::write(
+        source.path().join(codepack_core::ALLOWLIST_FILE_NAME),
+        format!("[[allow]]\nfingerprint = \"{accepted}\"\nreason = \"reviewed fixture\"\n"),
+    )
+    .unwrap();
+
+    let output_after = tempfile::tempdir().unwrap();
+    let after = run_once(source.path(), output_after.path(), &mut conn);
+    let after_findings = &after.analytics.as_ref().unwrap().scan_result.findings;
+
+    assert_eq!(
+        after_findings.len(),
+        before_count - 1,
+        "the accepted finding should be gone and nothing else with it"
+    );
+    assert!(
+        !after_findings
+            .iter()
+            .any(|finding| codepack_security::allow::fingerprint_of(finding) == accepted),
+        "the accepted finding is still being reported"
+    );
+    // The summary has to agree with the list it sits above.
+    assert_eq!(
+        after
+            .analytics
+            .as_ref()
+            .unwrap()
+            .scan_result
+            .summary
+            .total_findings,
+        after_findings.len()
+    );
+}
+
+/// A malformed file must stop the run rather than be ignored: silently skipping it
+/// would leave a reviewer believing findings are accepted when they are still reported.
+#[test]
+fn a_malformed_allowlist_fails_the_export_rather_than_being_ignored() {
+    let source = tempfile::tempdir().unwrap();
+    project_with_a_reported_secret(source.path());
+    fs::write(
+        source.path().join(codepack_core::ALLOWLIST_FILE_NAME),
+        "[[allow]]\nfingerprint = \"not-a-fingerprint\"\nreason = \"r\"\n",
+    )
+    .unwrap();
+
+    let output = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let mut conn = codepack_storage::open(&db_dir.path().join("codepack.db")).unwrap();
+    let config = Config::default();
+    let cancel = CancellationToken::new();
+    let (tx, _rx) = codepack_core::progress_channel();
+
+    let result = run_export(
+        &mut conn,
+        source.path(),
+        output.path(),
+        &config,
+        &HashMap::new(),
+        &tx,
+        &cancel,
+    );
+    assert!(
+        result.is_err(),
+        "a broken allowlist must not pass unnoticed"
+    );
+}
+
+/// The cache exists to make the second run cheaper without making it different.
+#[test]
+fn a_second_export_fills_the_cache_and_answers_identically() {
+    let source = tempfile::tempdir().unwrap();
+    project_with_a_reported_secret(source.path());
+    let db_dir = tempfile::tempdir().unwrap();
+    let mut conn = codepack_storage::open(&db_dir.path().join("codepack.db")).unwrap();
+
+    let first_out = tempfile::tempdir().unwrap();
+    let first = run_once(source.path(), first_out.path(), &mut conn);
+
+    let cached: i64 = conn
+        .query_row("SELECT COUNT(*) FROM file_scan_cache", [], |row| row.get(0))
+        .unwrap();
+    assert!(cached > 0, "the first export must fill the cache");
+
+    let second_out = tempfile::tempdir().unwrap();
+    let second = run_once(source.path(), second_out.path(), &mut conn);
+
+    assert_eq!(
+        first.analytics.as_ref().unwrap().scan_result,
+        second.analytics.as_ref().unwrap().scan_result,
+        "a cached run must produce the same findings as the run that filled it"
+    );
+
+    // Nothing new to learn from unchanged bytes.
+    let after: i64 = conn
+        .query_row("SELECT COUNT(*) FROM file_scan_cache", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(after, cached);
+}
+
+/// Changing a file must not be answered from the cache — the whole risk of a
+/// content-addressed store is a stale verdict presented as a current one.
+#[test]
+fn editing_a_file_produces_a_fresh_verdict() {
+    let source = tempfile::tempdir().unwrap();
+    fs::write(source.path().join("main.py"), "print('hello')\n").unwrap();
+    init_git_repo(source.path());
+    let db_dir = tempfile::tempdir().unwrap();
+    let mut conn = codepack_storage::open(&db_dir.path().join("codepack.db")).unwrap();
+
+    let clean_out = tempfile::tempdir().unwrap();
+    let clean = run_once(source.path(), clean_out.path(), &mut conn);
+    let clean_findings = clean.analytics.as_ref().unwrap().scan_result.findings.len();
+
+    // The same file, now carrying a credential.
+    fs::write(
+        source.path().join("main.py"),
+        "DATABASE_URL = \"postgres://user:hunter2hunter2@db.internal/app\"\n",
+    )
+    .unwrap();
+
+    let dirty_out = tempfile::tempdir().unwrap();
+    let dirty = run_once(source.path(), dirty_out.path(), &mut conn);
+    let dirty_findings = dirty.analytics.as_ref().unwrap().scan_result.findings.len();
+
+    assert!(
+        dirty_findings > clean_findings,
+        "the edit must be seen: {clean_findings} then {dirty_findings}"
+    );
+}
+
+/// With `redaction_labels` on, the labels have to reach the scanner's own artifacts —
+/// the gap Q34 named — and never the value itself.
+#[test]
+fn redaction_labels_reach_the_security_scan_report() {
+    let source = tempfile::tempdir().unwrap();
+    fs::write(
+        source.path().join("settings.py"),
+        "DATABASE_URL = \"postgres://user:hunter2hunter2@db.internal/app\"\n",
+    )
+    .unwrap();
+    init_git_repo(source.path());
+
+    let output = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let mut conn = codepack_storage::open(&db_dir.path().join("codepack.db")).unwrap();
+    let config = Config {
+        redaction_labels: true,
+        keep_staging_folder: true,
+        ..Config::default()
+    };
+    let cancel = CancellationToken::new();
+    let (tx, _rx) = codepack_core::progress_channel();
+
+    let outcome = run_export(
+        &mut conn,
+        source.path(),
+        output.path(),
+        &config,
+        &HashMap::new(),
+        &tx,
+        &cancel,
+    )
+    .unwrap();
+    drop(tx);
+
+    let report =
+        fs::read_to_string(outcome.paths.insights_dir.join("06_security_scan.json")).unwrap();
+    assert!(
+        report.contains("<REDACTED:s") || report.contains("<REDACTED_SECRET:s"),
+        "no label reached the scan report"
+    );
+    assert!(
+        !report.contains("hunter2hunter2"),
+        "invariant I3: the value must never reach an artifact"
+    );
+}
+
+/// And with the flag off — the default — the report is byte for byte what it always was.
+#[test]
+fn labels_off_leaves_the_scan_report_unlabelled() {
+    let source = tempfile::tempdir().unwrap();
+    fs::write(
+        source.path().join("settings.py"),
+        "DATABASE_URL = \"postgres://user:hunter2hunter2@db.internal/app\"\n",
+    )
+    .unwrap();
+    init_git_repo(source.path());
+
+    let output = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let mut conn = codepack_storage::open(&db_dir.path().join("codepack.db")).unwrap();
+    let outcome = run_once(source.path(), output.path(), &mut conn);
+
+    let report =
+        fs::read_to_string(outcome.paths.insights_dir.join("06_security_scan.json")).unwrap();
+    assert!(!report.contains("<REDACTED:s"));
+    assert!(!report.contains("<REDACTED_SECRET:s"));
+    assert!(!report.contains("hunter2hunter2"));
+}

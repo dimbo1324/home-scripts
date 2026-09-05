@@ -54,6 +54,50 @@ impl Language {
 mod tests {
     use super::*;
 
+    fn config_with(artifact_language: &str) -> codepack_core::config::Config {
+        codepack_core::config::Config {
+            artifact_language: artifact_language.to_string(),
+            ..codepack_core::config::Config::default()
+        }
+    }
+
+    #[test]
+    fn the_default_configuration_keeps_reports_in_english() {
+        // Every release so far wrote English, and a new setting must not change what an
+        // existing installation produces.
+        let config = codepack_core::config::Config::default();
+        assert_eq!(Language::from_config(&config), Language::En);
+    }
+
+    #[test]
+    fn the_artifact_language_is_read_and_not_the_interface_language() {
+        let mut config = config_with("ru");
+        // The interface language is deliberately the opposite, so a reader of this test
+        // can see which field is being consulted.
+        config.language = "en".to_string();
+        assert_eq!(Language::from_config(&config), Language::Ru);
+
+        let mut other = config_with("en");
+        other.language = "ru".to_string();
+        assert_eq!(Language::from_config(&other), Language::En);
+    }
+
+    #[test]
+    fn spelling_is_forgiving_about_case_and_padding() {
+        for spelling in ["RU", " ru ", "Ru"] {
+            assert_eq!(Language::from_config(&config_with(spelling)), Language::Ru);
+        }
+    }
+
+    /// A language this build does not know degrades to the one every report already has,
+    /// rather than stopping an export over a settings file.
+    #[test]
+    fn an_unknown_language_falls_back_to_english() {
+        for spelling in ["de", "", "klingon"] {
+            assert_eq!(Language::from_config(&config_with(spelling)), Language::En);
+        }
+    }
+
     #[test]
     fn pick_selects_the_matching_language() {
         assert_eq!(Language::En.pick("hello", "привет"), "hello");

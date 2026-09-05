@@ -104,3 +104,139 @@ pub(crate) fn write(path: &Path, project: &Path, result: &ScanResult) -> Result<
     })?;
     Ok(file.fingerprints.len())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codepack_security::{Finding, FindingKind, ScanSummary};
+
+    fn finding(rule: &str, file: &str) -> Finding {
+        Finding {
+            kind: FindingKind::PotentialSecret,
+            severity: "high".to_string(),
+            confidence: "high".to_string(),
+            file: file.to_string(),
+            line: Some(1),
+            rule: rule.to_string(),
+            message: "KEY=<REDACTED>".to_string(),
+        }
+    }
+
+    fn result_with(findings: Vec<Finding>) -> ScanResult {
+        ScanResult {
+            summary: ScanSummary::default(),
+            findings,
+        }
+    }
+
+    #[test]
+    fn what_is_recorded_is_what_is_later_held_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("baseline.json");
+        let old = finding("secret_like_line", "a.rs");
+        let result = result_with(vec![old.clone()]);
+
+        assert_eq!(write(&path, dir.path(), &result).unwrap(), 1);
+
+        let index = load(&path).unwrap();
+        assert!(index.contains_key(&crate::allow::fingerprint_of(&old)));
+        // The reason is fixed and deliberately unreassuring: nobody reviewed this.
+        assert!(index.values().all(|reason| reason.contains("not reviewed")));
+    }
+
+    #[test]
+    fn a_finding_that_arrived_later_is_not_in_the_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("baseline.json");
+        let old = finding("secret_like_line", "a.rs");
+        write(&path, dir.path(), &result_with(vec![old.clone()])).unwrap();
+
+        let index = load(&path).unwrap();
+        let fresh = finding("secret_like_line", "b.rs");
+        assert!(!index.contains_key(&crate::allow::fingerprint_of(&fresh)));
+    }
+
+    #[test]
+    fn the_file_is_stable_and_deduplicated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("baseline.json");
+        // The same finding twice, and a second one out of order.
+        let repeated = finding("rule", "a.rs");
+        let other = finding("rule", "b.rs");
+        let count = write(
+            &path,
+            dir.path(),
+            &result_with(vec![other, repeated.clone(), repeated]),
+        )
+        .unwrap();
+        assert_eq!(count, 2, "duplicates collapse");
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        let parsed: BaselineFile = serde_json::from_str(&body).unwrap();
+        let mut sorted = parsed.fingerprints.clone();
+        sorted.sort();
+        assert_eq!(parsed.fingerprints, sorted, "written sorted, so diffs read");
+        assert_eq!(parsed.schema_version, SCHEMA_VERSION);
+        assert!(!parsed.generated_at.is_empty());
+    }
+
+    #[test]
+    fn an_empty_result_writes_an_empty_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("baseline.json");
+        assert_eq!(
+            write(&path, dir.path(), &result_with(Vec::new())).unwrap(),
+            0
+        );
+        assert!(load(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_missing_baseline_is_an_error_that_names_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = load(&dir.path().join("absent.json"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("absent.json"), "{error}");
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_baseline_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("baseline.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        assert!(load(&path).is_err());
+    }
+
+    /// A newer file may mean a different fingerprint recipe, and answering from it would
+    /// hold back findings that are not the ones it recorded.
+    #[test]
+    fn a_baseline_from_a_newer_build_is_refused_rather_than_guessed_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("baseline.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"schema_version": {}, "generated_at": "now", "project": "p", "fingerprints": []}}"#,
+                SCHEMA_VERSION + 1
+            ),
+        )
+        .unwrap();
+
+        let error = load(&path).unwrap_err().to_string();
+        assert!(error.contains("newer codepack"), "{error}");
+    }
+
+    #[test]
+    fn a_baseline_from_this_build_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("baseline.json");
+        write(
+            &path,
+            dir.path(),
+            &result_with(vec![finding("rule", "a.rs")]),
+        )
+        .unwrap();
+        assert_eq!(load(&path).unwrap().len(), 1);
+    }
+}

@@ -333,3 +333,143 @@ fn ancestor_renderings(relative: &Path) -> Vec<String> {
     }
     rendered
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn project() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src").join("main.rs"), "fn main() {}\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules").join("left-pad")).unwrap();
+        std::fs::write(
+            dir.path()
+                .join("node_modules")
+                .join("left-pad")
+                .join("index.js"),
+            "module.exports = 1;\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join(".env"), "API_KEY=abcdef0123456789\n").unwrap();
+        dir
+    }
+
+    fn explain(dir: &Path, file: &str) -> FileExplanation {
+        explain_file(dir, &Config::default(), Path::new(file)).unwrap()
+    }
+
+    #[test]
+    fn a_planned_file_is_included_and_says_so() {
+        let dir = project();
+        let answer = explain(dir.path(), "src/main.rs");
+
+        assert_eq!(answer.verdict, VERDICT_INCLUDED);
+        assert!(answer.exists_on_disk);
+        assert!(!answer.reason.is_empty());
+        assert!(answer.size.is_some());
+        assert_eq!(answer.file, r"src\main.rs");
+    }
+
+    /// The answer a user chasing a missing file actually needs: not "it is not in the
+    /// plan" but "it is under a directory the walk skipped".
+    #[test]
+    fn a_file_under_a_skipped_directory_names_that_directory() {
+        let dir = project();
+        let answer = explain(dir.path(), "node_modules/left-pad/index.js");
+
+        assert_eq!(answer.verdict, VERDICT_NOT_PLANNED);
+        assert!(answer.exists_on_disk);
+        assert!(
+            answer.skipped_directory.is_some(),
+            "expected a named directory, got {answer:?}"
+        );
+        assert!(answer.reason.contains("skipped"));
+    }
+
+    /// A typo and a deliberately unvisited file both come back `not_planned`, so the
+    /// existence flag is what tells them apart.
+    #[test]
+    fn a_file_that_is_not_there_is_distinguishable_from_one_that_was_skipped() {
+        let dir = project();
+        let answer = explain(dir.path(), "src/nope.rs");
+
+        assert_eq!(answer.verdict, VERDICT_NOT_PLANNED);
+        assert!(!answer.exists_on_disk);
+        assert!(answer.skipped_directory.is_none());
+        assert!(answer.reason.contains("no such file"));
+    }
+
+    #[test]
+    fn a_sensitive_file_is_excluded_under_the_default_safe_mode() {
+        let dir = project();
+        let answer = explain(dir.path(), ".env");
+
+        assert_eq!(answer.verdict, VERDICT_EXCLUDED);
+        assert!(!answer.reason.is_empty());
+    }
+
+    /// All three spellings name the same file: a user copying a path out of
+    /// `manifest.json` should not have to translate it.
+    #[test]
+    fn every_spelling_of_a_path_reaches_the_same_answer() {
+        let dir = project();
+        let relative = explain(dir.path(), "src/main.rs");
+        let plan_spelled = explain(dir.path(), r"src\main.rs");
+        let dotted = explain(dir.path(), "./src/main.rs");
+        let absolute = explain_file(
+            dir.path(),
+            &Config::default(),
+            &dir.path().join("src").join("main.rs"),
+        )
+        .unwrap();
+
+        for other in [plan_spelled, dotted, absolute] {
+            assert_eq!(other.file, relative.file);
+            assert_eq!(other.verdict, relative.verdict);
+        }
+    }
+
+    #[test]
+    fn a_path_outside_the_project_is_refused_rather_than_answered() {
+        let dir = project();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("stranger.rs"), "\n").unwrap();
+
+        let error = explain_file(
+            dir.path(),
+            &Config::default(),
+            &outside.path().join("stranger.rs"),
+        )
+        .unwrap_err();
+        assert!(matches!(error, EngineError::Explain(_)), "{error:?}");
+    }
+
+    #[test]
+    fn the_configuration_it_answered_with_is_reported_back() {
+        let dir = project();
+        let config = Config {
+            export_profile: "minimal".to_string(),
+            ..Config::default()
+        };
+        let answer = explain_file(dir.path(), &config, Path::new("src/main.rs")).unwrap();
+
+        assert_eq!(answer.profile, "minimal");
+        assert_eq!(answer.safe_mode, config.normalized_safe_export_mode());
+        assert!(!answer.diff_mode.is_empty());
+    }
+
+    #[test]
+    fn explaining_writes_nothing() {
+        let dir = project();
+        let before = std::fs::read_dir(dir.path()).unwrap().count();
+        let _ = explain(dir.path(), "src/main.rs");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), before);
+    }
+
+    #[test]
+    fn the_default_reason_depends_on_the_verdict() {
+        assert!(default_reason(VERDICT_INCLUDED).contains("included"));
+        assert!(default_reason(VERDICT_EXCLUDED).contains("excluded"));
+    }
+}

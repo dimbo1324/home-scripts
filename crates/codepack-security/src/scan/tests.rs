@@ -406,3 +406,531 @@ fn cancellation_is_checked_inside_the_file_loop() {
     let result = scan_project(dir.path(), &files, None, &cancel);
     assert!(matches!(result, Err(SecurityError::Cancelled)));
 }
+
+// --- Parallelism, options and the content cache ---------------------------------------
+//
+// Everything below covers behaviour added on 2026-09-05: the per-file pass became
+// parallel, and gained a redactor, a strict-checksum switch and a cache.
+
+/// A cache that lives in this test, so the scanner's side of the contract can be
+/// exercised without a database.
+#[derive(Default)]
+struct MemoryCache {
+    entries: std::sync::Mutex<std::collections::HashMap<String, Vec<crate::cache::CachedFinding>>>,
+    lookups: std::sync::atomic::AtomicUsize,
+    stores: std::sync::atomic::AtomicUsize,
+}
+
+impl MemoryCache {
+    fn lookups(&self) -> usize {
+        self.lookups.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn stores(&self) -> usize {
+        self.stores.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl crate::cache::FileScanCache for MemoryCache {
+    fn lookup(&self, key: &str) -> Option<Vec<crate::cache::CachedFinding>> {
+        self.lookups
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.entries.lock().unwrap().get(key).cloned()
+    }
+
+    fn store(&self, key: &str, findings: &[crate::cache::CachedFinding]) {
+        self.stores
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.entries
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), findings.to_vec());
+    }
+}
+
+/// A project wide enough that rayon really splits it, with findings of several
+/// severities spread across files whose names collide when lowercased.
+fn many_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = vec![write_file(dir, ".env", "API_KEY=abcdef0123456789\n")];
+    for index in 0..40 {
+        files.push(write_file(
+            dir,
+            &format!("src/mod{index}.py"),
+            "import os\npassword = \"hunter2hunter2hunter2\"\neval(user_input)\nprint(1)\n",
+        ));
+    }
+    // Two paths differing only in case: their sort keys tie, so only insertion order
+    // decides, which is exactly what the parallel collection must preserve.
+    files.push(write_file(
+        dir,
+        "src/Alpha.txt",
+        "token = \"abcdefghijklmnop\"\n",
+    ));
+    files.push(write_file(
+        dir,
+        "src/other.txt",
+        "token = \"abcdefghijklmnop\"\n",
+    ));
+    files
+}
+
+/// The property the whole parallel rewrite rests on. A different order here would move
+/// findings in `06_security_scan.json`, SARIF and the golden references, silently.
+#[test]
+fn the_finding_order_is_the_same_on_every_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = many_files(dir.path());
+
+    let first = scan_project(dir.path(), &files, None, &no_cancel()).unwrap();
+    assert!(
+        first.findings.len() > 40,
+        "the fixture must be worth sorting"
+    );
+
+    for attempt in 0..15 {
+        let again = scan_project(dir.path(), &files, None, &no_cancel()).unwrap();
+        assert_eq!(again, first, "run {attempt} disagreed with the first");
+    }
+}
+
+/// The same files in a different order are a different input, and the answer follows
+/// the input rather than the thread schedule.
+#[test]
+fn the_order_follows_the_input_not_the_schedule() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = many_files(dir.path());
+    let mut reversed = files.clone();
+    reversed.reverse();
+
+    let forwards = scan_project(dir.path(), &files, None, &no_cancel()).unwrap();
+    let backwards = scan_project(dir.path(), &reversed, None, &no_cancel()).unwrap();
+
+    // Same findings either way — the sort is total enough for that…
+    assert_eq!(forwards.summary, backwards.summary);
+    // …and repeating the reversed input reproduces the reversed answer exactly.
+    let backwards_again = scan_project(dir.path(), &reversed, None, &no_cancel()).unwrap();
+    assert_eq!(backwards, backwards_again);
+}
+
+#[test]
+fn cancellation_is_still_observed_per_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = many_files(dir.path());
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let error = scan_project(dir.path(), &files, None, &cancel).unwrap_err();
+    assert!(matches!(error, SecurityError::Cancelled));
+}
+
+#[test]
+fn default_options_are_the_four_argument_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = many_files(dir.path());
+
+    let plain = scan_project(dir.path(), &files, None, &no_cancel()).unwrap();
+    let explicit = scan_project_with_options(
+        dir.path(),
+        &files,
+        None,
+        &no_cancel(),
+        &ScanOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(plain, explicit);
+}
+
+// --- Redaction labels reaching the scanner's own artifacts (Q34) ----------------------
+
+fn scan_with(dir: &Path, files: &[PathBuf], options: &ScanOptions<'_>) -> ScanResult {
+    scan_project_with_options(dir, files, None, &no_cancel(), options).unwrap()
+}
+
+#[test]
+fn a_labelling_redactor_puts_labels_in_the_findings() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = vec![write_file(
+        dir.path(),
+        "app.py",
+        "API_KEY = \"one-secret-value-here\"\nOTHER_KEY = \"another-secret-value\"\n",
+    )];
+
+    let redactor = crate::Redactor::labelled();
+    let result = scan_with(
+        dir.path(),
+        &files,
+        &ScanOptions {
+            redactor: Some(&redactor),
+            ..ScanOptions::default()
+        },
+    );
+
+    let messages: Vec<&str> = result
+        .findings
+        .iter()
+        .map(|finding| finding.message.as_str())
+        .collect();
+    // The numbers themselves are a run's own bookkeeping — first-seen order, and the
+    // line's own redaction may consume one before the finding does. What the feature
+    // promises is that two different secrets are told apart, so that is what is asserted.
+    let labels: std::collections::BTreeSet<String> = messages
+        .iter()
+        .flat_map(|message| {
+            message.match_indices("<REDACTED:").filter_map(|(at, _)| {
+                message[at..]
+                    .split_once('>')
+                    .map(|(label, _)| label.to_string())
+            })
+        })
+        .collect();
+    assert!(
+        !labels.is_empty(),
+        "no label reached a finding: {messages:?}"
+    );
+    assert_eq!(
+        labels.len(),
+        2,
+        "two distinct secrets must carry two distinct labels: {messages:?}"
+    );
+    // And never the value itself (invariant I3).
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains("secret-value"))
+    );
+}
+
+#[test]
+fn a_plain_redactor_is_byte_for_byte_the_old_behaviour() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = many_files(dir.path());
+
+    let plain = crate::Redactor::plain();
+    let with_redactor = scan_with(
+        dir.path(),
+        &files,
+        &ScanOptions {
+            redactor: Some(&plain),
+            ..ScanOptions::default()
+        },
+    );
+    let without = scan_project(dir.path(), &files, None, &no_cancel()).unwrap();
+    assert_eq!(with_redactor, without);
+}
+
+// --- Strict token checksums ------------------------------------------------------------
+
+/// A token shaped like GitHub's but with a checksum that cannot recompute — the shape a
+/// documentation sample takes.
+const PLACEHOLDER_TOKEN: &str = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+
+#[test]
+fn a_failed_checksum_is_ignored_unless_strict_mode_is_asked_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = vec![write_file(
+        dir.path(),
+        "docs.md",
+        // A bare token, no keyword: `token = "..."` would be claimed by the keyword
+        // cascade first (rule 1), and the provider rule would never be consulted.
+        &format!("{PLACEHOLDER_TOKEN}\n"),
+    )];
+
+    let relaxed = scan_project(dir.path(), &files, None, &no_cancel()).unwrap();
+    let token_finding = relaxed
+        .findings
+        .iter()
+        .find(|finding| finding.rule == "github-token")
+        .expect("the shape is still recognised");
+    assert_eq!(
+        token_finding.severity, "critical",
+        "the default must not weaken a finding on an unverified recipe"
+    );
+}
+
+#[test]
+fn strict_mode_weakens_a_token_whose_checksum_fails_without_dropping_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = vec![write_file(
+        dir.path(),
+        "docs.md",
+        // A bare token, no keyword: `token = "..."` would be claimed by the keyword
+        // cascade first (rule 1), and the provider rule would never be consulted.
+        &format!("{PLACEHOLDER_TOKEN}\n"),
+    )];
+
+    let strict = scan_with(
+        dir.path(),
+        &files,
+        &ScanOptions {
+            strict_token_checksums: true,
+            ..ScanOptions::default()
+        },
+    );
+    let token_finding = strict
+        .findings
+        .iter()
+        .find(|finding| finding.rule == "github-token")
+        .expect("still reported, never dropped");
+    assert_eq!(token_finding.severity, "medium");
+}
+
+/// A token built the way the recipe says one is built, so a *valid* checksum can be
+/// tested rather than only an invalid one.
+fn token_with_a_valid_checksum() -> String {
+    use crate::patterns::checksum::{ENTROPY_LEN, base62_checksum, crc32};
+    let entropy: String = "abcdefghij0123456789ABCDEFGHIJ".to_string();
+    assert_eq!(entropy.len(), ENTROPY_LEN);
+    format!(
+        "ghp_{entropy}{}",
+        base62_checksum(crc32(entropy.as_bytes()))
+    )
+}
+
+/// The half that matters most: strict mode must weaken only what actually failed.
+///
+/// Note what this run shows about the layering. A realistic token — mixed alphanumerics
+/// after `ghp_` — is claimed by the keyword cascade (rule 1) before the provider
+/// signature is ever consulted, so it is reported as `secret_like_line`/`high` and the
+/// checksum branch does not see it at all. That is a safety property worth stating: the
+/// unverified recipe cannot reach a token the cascade already recognised, which is the
+/// shape a real credential takes. Strict mode therefore changes nothing here.
+#[test]
+fn strict_mode_leaves_a_token_whose_checksum_holds_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = vec![write_file(
+        dir.path(),
+        "config.py",
+        &format!(
+            "{}
+",
+            token_with_a_valid_checksum()
+        ),
+    )];
+
+    let relaxed = scan_project(dir.path(), &files, None, &no_cancel()).unwrap();
+    let strict = scan_with(
+        dir.path(),
+        &files,
+        &ScanOptions {
+            strict_token_checksums: true,
+            ..ScanOptions::default()
+        },
+    );
+
+    assert_eq!(
+        relaxed, strict,
+        "a token whose checksum holds must be reported identically either way"
+    );
+    assert!(
+        relaxed
+            .findings
+            .iter()
+            .any(|finding| finding.severity == "critical" || finding.severity == "high"),
+        "and it must still be reported strongly: {:?}",
+        relaxed.findings
+    );
+}
+
+/// A vendor with no recipe must never be weakened: "I cannot check this" is not
+/// evidence about the token.
+#[test]
+fn strict_mode_leaves_an_uncheckable_vendor_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = vec![write_file(
+        dir.path(),
+        "aws.py",
+        "aws_access_key_id = \"AKIAABCDEFGHIJKLMNOP\"
+",
+    )];
+
+    let relaxed = scan_project(dir.path(), &files, None, &no_cancel()).unwrap();
+    let strict = scan_with(
+        dir.path(),
+        &files,
+        &ScanOptions {
+            strict_token_checksums: true,
+            ..ScanOptions::default()
+        },
+    );
+    assert_eq!(relaxed, strict);
+}
+
+// --- The content cache ------------------------------------------------------------------
+
+#[test]
+fn a_second_scan_is_served_from_the_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = many_files(dir.path());
+    let cache = MemoryCache::default();
+
+    let first = scan_with(
+        dir.path(),
+        &files,
+        &ScanOptions {
+            cache: Some(&cache),
+            ..ScanOptions::default()
+        },
+    );
+    let stored_after_first = cache.stores();
+    assert!(stored_after_first > 0, "the first pass must fill the cache");
+
+    let second = scan_with(
+        dir.path(),
+        &files,
+        &ScanOptions {
+            cache: Some(&cache),
+            ..ScanOptions::default()
+        },
+    );
+
+    assert_eq!(first, second, "a cached answer must equal a computed one");
+    assert_eq!(
+        cache.stores(),
+        stored_after_first,
+        "nothing new should have been scanned the second time"
+    );
+    assert!(cache.lookups() >= files.len());
+}
+
+/// The mistake a content-keyed cache invites: `.env` and a copy of it under another
+/// name have the same bytes and different verdicts.
+#[test]
+fn the_sensitive_filename_verdict_is_never_served_from_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let secret_line = "API_KEY=abcdef0123456789\n";
+    let env = write_file(dir.path(), ".env", secret_line);
+    let notes = write_file(dir.path(), "notes.txt", secret_line);
+    let cache = MemoryCache::default();
+
+    let options = ScanOptions {
+        cache: Some(&cache),
+        ..ScanOptions::default()
+    };
+    // `.env` first, so its entry is in the cache before `notes.txt` is looked at.
+    let result = scan_with(dir.path(), &[env, notes], &options);
+
+    let sensitive: Vec<&str> = result
+        .findings
+        .iter()
+        .filter(|finding| finding.kind == FindingKind::SensitiveFile)
+        .map(|finding| finding.file.as_str())
+        .collect();
+    assert_eq!(
+        sensitive.len(),
+        1,
+        "notes.txt must not inherit .env's verdict: {sensitive:?}"
+    );
+    assert!(
+        sensitive[0].ends_with(".env"),
+        "the surviving sensitive-file finding should be .env's: {sensitive:?}"
+    );
+}
+
+#[test]
+fn a_cached_run_and_an_uncached_run_agree() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = many_files(dir.path());
+    let cache = MemoryCache::default();
+
+    let uncached = scan_project(dir.path(), &files, None, &no_cancel()).unwrap();
+    let cold = scan_with(
+        dir.path(),
+        &files,
+        &ScanOptions {
+            cache: Some(&cache),
+            ..ScanOptions::default()
+        },
+    );
+    let warm = scan_with(
+        dir.path(),
+        &files,
+        &ScanOptions {
+            cache: Some(&cache),
+            ..ScanOptions::default()
+        },
+    );
+
+    assert_eq!(uncached, cold);
+    assert_eq!(uncached, warm);
+}
+
+/// Labels are numbered per run, so a message stored by an earlier one would carry a
+/// number standing for a different value. The cache is skipped rather than risked.
+#[test]
+fn a_labelling_run_does_not_touch_the_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = many_files(dir.path());
+    let cache = MemoryCache::default();
+    let redactor = crate::Redactor::labelled();
+
+    scan_with(
+        dir.path(),
+        &files,
+        &ScanOptions {
+            redactor: Some(&redactor),
+            cache: Some(&cache),
+            ..ScanOptions::default()
+        },
+    );
+
+    assert_eq!(cache.lookups(), 0);
+    assert_eq!(cache.stores(), 0);
+}
+
+/// An entry recorded with one option set must not answer a run with another, or the
+/// switch would appear to do nothing.
+#[test]
+fn strict_mode_does_not_read_the_relaxed_run_s_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = vec![write_file(
+        dir.path(),
+        "docs.md",
+        // A bare token, no keyword: `token = "..."` would be claimed by the keyword
+        // cascade first (rule 1), and the provider rule would never be consulted.
+        &format!("{PLACEHOLDER_TOKEN}\n"),
+    )];
+    let cache = MemoryCache::default();
+
+    let relaxed = scan_with(
+        dir.path(),
+        &files,
+        &ScanOptions {
+            cache: Some(&cache),
+            ..ScanOptions::default()
+        },
+    );
+    let strict = scan_with(
+        dir.path(),
+        &files,
+        &ScanOptions {
+            cache: Some(&cache),
+            strict_token_checksums: true,
+            ..ScanOptions::default()
+        },
+    );
+
+    let severity_of = |result: &ScanResult| {
+        result
+            .findings
+            .iter()
+            .find(|finding| finding.rule == "github-token")
+            .map(|finding| finding.severity.clone())
+            .unwrap()
+    };
+    assert_eq!(severity_of(&relaxed), "critical");
+    assert_eq!(severity_of(&strict), "medium");
+}
+
+#[test]
+fn result_from_findings_recounts_by_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = many_files(dir.path());
+    let result = scan_project(dir.path(), &files, None, &no_cancel()).unwrap();
+
+    let rebuilt = result_from_findings(result.findings.clone());
+    assert_eq!(rebuilt.summary, result.summary);
+    assert_eq!(rebuilt.findings, result.findings);
+
+    let empty = result_from_findings(Vec::new());
+    assert_eq!(empty.summary, ScanSummary::default());
+}

@@ -82,3 +82,106 @@ pub fn prune_scan_cache(conn: &Connection, keep: u32) -> Result<usize> {
     )?;
     Ok(removed)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn database() -> (tempfile::TempDir, Connection) {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::migrations::open(&dir.path().join("codepack.db")).unwrap();
+        (dir, conn)
+    }
+
+    fn entries(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(key, json)| ((*key).to_string(), (*json).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_fresh_cache_is_empty() {
+        let (_dir, conn) = database();
+        assert!(load_scan_cache(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn what_is_stored_comes_back() {
+        let (_dir, mut conn) = database();
+        store_scan_cache(&mut conn, &entries(&[("a", "[]"), ("b", "[1]")]), &[]).unwrap();
+
+        let mut loaded = load_scan_cache(&conn).unwrap();
+        loaded.sort();
+        assert_eq!(loaded, entries(&[("a", "[]"), ("b", "[1]")]));
+    }
+
+    /// The same bytes under the same build key the same, so a second run rewrites the
+    /// row rather than colliding with it.
+    #[test]
+    fn storing_the_same_key_twice_replaces_rather_than_duplicates() {
+        let (_dir, mut conn) = database();
+        store_scan_cache(&mut conn, &entries(&[("a", "[]")]), &[]).unwrap();
+        store_scan_cache(&mut conn, &entries(&[("a", "[2]")]), &[]).unwrap();
+
+        let loaded = load_scan_cache(&conn).unwrap();
+        assert_eq!(loaded, entries(&[("a", "[2]")]));
+    }
+
+    #[test]
+    fn an_empty_write_is_a_no_op_rather_than_an_error() {
+        let (_dir, mut conn) = database();
+        store_scan_cache(&mut conn, &[], &[]).unwrap();
+        assert!(load_scan_cache(&conn).unwrap().is_empty());
+    }
+
+    /// Least-recently-*used*, not least recently written: a dependency scanned on every
+    /// run has to outlive a file touched once, and "oldest first" would evict it.
+    #[test]
+    fn pruning_keeps_what_was_used_and_drops_the_rest() {
+        let (_dir, mut conn) = database();
+        store_scan_cache(
+            &mut conn,
+            &entries(&[("old", "[]"), ("kept", "[]"), ("also-old", "[]")]),
+            &[],
+        )
+        .unwrap();
+
+        // A later run touches one of them, which is what "in use" means here.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        store_scan_cache(&mut conn, &[], &["kept".to_string()]).unwrap();
+
+        let removed = prune_scan_cache(&conn, 1).unwrap();
+        assert_eq!(removed, 2);
+
+        let loaded = load_scan_cache(&conn).unwrap();
+        assert_eq!(loaded, entries(&[("kept", "[]")]));
+    }
+
+    #[test]
+    fn pruning_below_the_ceiling_removes_nothing() {
+        let (_dir, mut conn) = database();
+        store_scan_cache(&mut conn, &entries(&[("a", "[]"), ("b", "[]")]), &[]).unwrap();
+        assert_eq!(prune_scan_cache(&conn, 10).unwrap(), 0);
+        assert_eq!(load_scan_cache(&conn).unwrap().len(), 2);
+    }
+
+    /// Touching a key that is not there is not an error: the run that used it may have
+    /// been racing a prune, and failing an export over a cache miss would be absurd.
+    #[test]
+    fn touching_an_absent_key_is_harmless() {
+        let (_dir, mut conn) = database();
+        store_scan_cache(&mut conn, &[], &["never-stored".to_string()]).unwrap();
+        assert!(load_scan_cache(&conn).unwrap().is_empty());
+    }
+
+    /// The cache is content-addressed and shared, so it deliberately has no project
+    /// foreign key — two projects vendoring the same dependency scan it once.
+    #[test]
+    fn entries_outlive_the_project_tables() {
+        let (_dir, mut conn) = database();
+        store_scan_cache(&mut conn, &entries(&[("shared", "[]")]), &[]).unwrap();
+        conn.execute("DELETE FROM project", []).unwrap();
+        assert_eq!(load_scan_cache(&conn).unwrap().len(), 1);
+    }
+}

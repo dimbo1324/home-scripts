@@ -206,7 +206,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_database_reaches_schema_version_1_with_every_table_and_index() {
+    fn fresh_database_reaches_the_current_schema_version_with_every_table_and_index() {
         let dir = tempfile::tempdir().unwrap();
         let conn = open(&dir.path().join("codepack.db")).unwrap();
 
@@ -215,7 +215,10 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 1);
+        // Every migration in `MIGRATIONS` has been applied. Asserted against the table
+        // rather than against a literal, so adding one cannot leave this test passing
+        // while claiming a version the database does not have.
+        assert_eq!(version, MIGRATIONS.last().unwrap().0);
 
         let tables = table_names(&conn);
         for expected in [
@@ -276,6 +279,7 @@ mod tests {
         let row_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(row_count, 1);
+        // One row per migration and no more: a second open must record nothing.
+        assert_eq!(row_count, MIGRATIONS.len() as i64);
     }
 }

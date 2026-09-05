@@ -173,6 +173,38 @@ pub fn scan_project(project_root: String, config: Config) -> CommandResult<ScanR
     })
 }
 
+/// Why one file did, or did not, end up in an export.
+///
+/// Thin on purpose: the verdict is `codepack-engine`'s, exactly as the CLI's `explain`
+/// command gets it. The preview tree already shows a short reason per excluded file;
+/// this answers the fuller question a person asks while looking at that tree — which
+/// setting decided it, and whether widening the diff or the safe mode is the fix.
+#[tauri::command]
+pub fn explain_file(
+    project_root: String,
+    config: Config,
+    file: String,
+) -> CommandResult<FileExplanation> {
+    let root = resolve_project_root(&project_root)?;
+    let explanation =
+        codepack_engine::explain::explain_file(&root, &config, std::path::Path::new(&file))
+            .map_err(CommandError::new)?;
+    Ok(FileExplanation {
+        file: explanation.file,
+        profile: explanation.profile,
+        safe_mode: explanation.safe_mode,
+        diff_mode: explanation.diff_mode,
+        verdict: explanation.verdict.to_string(),
+        reason: explanation.reason,
+        group: explanation.group,
+        severity: explanation.severity,
+        size: explanation.size,
+        size_human: explanation.size.map(codepack_tokens::format_bytes),
+        skipped_directory: explanation.skipped_directory,
+        exists_on_disk: explanation.exists_on_disk,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,36 +380,71 @@ mod tests {
         let file = dir.path().join("README.md");
         assert!(open_project(file.display().to_string()).is_err());
     }
-}
 
-/// Why one file did, or did not, end up in an export.
-///
-/// Thin on purpose: the verdict is `codepack-engine`'s, exactly as the CLI's `explain`
-/// command gets it. The preview tree already shows a short reason per excluded file;
-/// this answers the fuller question a person asks while looking at that tree — which
-/// setting decided it, and whether widening the diff or the safe mode is the fix.
-#[tauri::command]
-pub fn explain_file(
-    project_root: String,
-    config: Config,
-    file: String,
-) -> CommandResult<FileExplanation> {
-    let root = resolve_project_root(&project_root)?;
-    let explanation =
-        codepack_engine::explain::explain_file(&root, &config, std::path::Path::new(&file))
-            .map_err(CommandError::new)?;
-    Ok(FileExplanation {
-        file: explanation.file,
-        profile: explanation.profile,
-        safe_mode: explanation.safe_mode,
-        diff_mode: explanation.diff_mode,
-        verdict: explanation.verdict.to_string(),
-        reason: explanation.reason,
-        group: explanation.group,
-        severity: explanation.severity,
-        size: explanation.size,
-        size_human: explanation.size.map(codepack_tokens::format_bytes),
-        skipped_directory: explanation.skipped_directory,
-        exists_on_disk: explanation.exists_on_disk,
-    })
+    // --- explain (2026-09-05) --------------------------------------------------------
+
+    #[test]
+    fn explaining_an_included_file_says_so() {
+        let dir = fixture();
+        let answer =
+            explain_file(root_of(&dir), Config::default(), "src/main.rs".to_string()).unwrap();
+
+        assert_eq!(answer.verdict, "included");
+        assert!(answer.exists_on_disk);
+        assert!(!answer.reason.is_empty());
+        assert!(
+            answer.size_human.is_some(),
+            "the app renders bytes, not only a count"
+        );
+    }
+
+    #[test]
+    fn explaining_a_file_that_is_not_there_says_that_instead() {
+        let dir = fixture();
+        let answer =
+            explain_file(root_of(&dir), Config::default(), "src/nope.rs".to_string()).unwrap();
+
+        assert_eq!(answer.verdict, "not_planned");
+        assert!(!answer.exists_on_disk);
+    }
+
+    /// The point of moving the verdict into the engine: the app and `codepack explain`
+    /// answer from one implementation, so they cannot drift apart.
+    #[test]
+    fn the_app_and_the_engine_give_the_same_verdict() {
+        let dir = fixture();
+        let config = Config::default();
+        let engine = codepack_engine::explain::explain_file(
+            dir.path(),
+            &config,
+            std::path::Path::new("src/main.rs"),
+        )
+        .unwrap();
+        let app = explain_file(root_of(&dir), config, "src/main.rs".to_string()).unwrap();
+
+        assert_eq!(app.verdict, engine.verdict);
+        assert_eq!(app.reason, engine.reason);
+        assert_eq!(app.file, engine.file);
+        assert_eq!(app.size, engine.size);
+    }
+
+    #[test]
+    fn a_path_outside_the_project_is_an_error_the_ui_can_show() {
+        let dir = fixture();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            outside.path().join("stranger.rs"),
+            "
+",
+        )
+        .unwrap();
+
+        let error = explain_file(
+            root_of(&dir),
+            Config::default(),
+            outside.path().join("stranger.rs").display().to_string(),
+        )
+        .unwrap_err();
+        assert!(!format!("{error:?}").is_empty());
+    }
 }

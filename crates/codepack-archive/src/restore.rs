@@ -123,6 +123,63 @@ pub fn restore_archive_set(archive_set_dir: &Path, destination: &Path) -> Result
     Ok(total)
 }
 
+/// The file members of a zip archive, by name.
+///
+/// Reading a produced bundle without unpacking it: the export deletes its staging folder
+/// as soon as the archive is written, so the archive is the only copy left. Directory
+/// entries are skipped — a caller wants the artifacts, not the shape of the tree.
+pub fn list_zip_entries(archive_path: &Path) -> Result<Vec<String>> {
+    let file = std::fs::File::open(archive_path).map_err(|source| ArchiveError::Read {
+        path: archive_path.to_path_buf(),
+        source,
+    })?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|source| ArchiveError::Zip {
+        path: archive_path.to_path_buf(),
+        source,
+    })?;
+
+    let mut names = Vec::with_capacity(archive.len());
+    for index in 0..archive.len() {
+        let member = archive
+            .by_index(index)
+            .map_err(|source| ArchiveError::Zip {
+                path: archive_path.to_path_buf(),
+                source,
+            })?;
+        if member.is_file() {
+            names.push(member.name().to_string());
+        }
+    }
+    Ok(names)
+}
+
+/// One member of a zip archive, as text.
+///
+/// Nothing is written to disk, so the path-traversal question [`safe_member_target`]
+/// answers does not arise: a member is read into memory under the name the caller asked
+/// for, and a name that is not in the archive is an error rather than a guess.
+pub fn read_zip_entry_to_string(archive_path: &Path, entry: &str) -> Result<String> {
+    let file = std::fs::File::open(archive_path).map_err(|source| ArchiveError::Read {
+        path: archive_path.to_path_buf(),
+        source,
+    })?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|source| ArchiveError::Zip {
+        path: archive_path.to_path_buf(),
+        source,
+    })?;
+    let mut member = archive.by_name(entry).map_err(|source| ArchiveError::Zip {
+        path: archive_path.to_path_buf(),
+        source,
+    })?;
+
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut member, &mut text).map_err(|source| ArchiveError::Read {
+        path: archive_path.to_path_buf(),
+        source,
+    })?;
+    Ok(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

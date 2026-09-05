@@ -463,9 +463,13 @@ mod tests {
         assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(result["serverInfo"]["name"], SERVER_NAME);
         assert!(result["capabilities"]["tools"].is_object());
-        // Capabilities this build does not implement must not be advertised.
-        assert!(result["capabilities"].get("resources").is_none());
+        // Resources arrived with the bundle registry, so the declaration has to match:
+        // a client either never asks for what is there, or asks for what is not.
+        assert!(result["capabilities"]["resources"].is_object());
+        assert_eq!(result["capabilities"]["resources"]["subscribe"], false);
+        // Capabilities this build still does not implement must not be advertised.
         assert!(result["capabilities"].get("prompts").is_none());
+        assert!(result["capabilities"].get("sampling").is_none());
     }
 
     #[test]
@@ -511,7 +515,10 @@ mod tests {
 
     #[test]
     fn an_unknown_method_is_a_protocol_error_not_a_crash() {
-        let responses = drive("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/list\"}\n");
+        // `resources/list` used to stand in for "unknown" here; it is implemented now, so
+        // the example moved to one that genuinely is not. The rule under test never
+        // changed: a method this build does not know is answered, not crashed on.
+        let responses = drive("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"prompts/list\"}\n");
         assert_eq!(responses[0]["error"]["code"], METHOD_NOT_FOUND);
     }
 
@@ -590,5 +597,135 @@ mod tests {
         // How an MCP client shuts a server down. Treating it as an error would make
         // every clean disconnect look like a crash.
         assert!(drive("").is_empty());
+    }
+
+    // --- The loop's new shape (2026-09-05) -------------------------------------------
+
+    #[test]
+    fn a_tool_call_is_recognised_as_needing_a_worker() {
+        let call = pending_tool_call(
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"codepack_preview","arguments":{"project":"."}}}"#,
+        )
+        .expect("a well-formed tool call");
+        assert_eq!(call.id, json!(7));
+        assert_eq!(call.name, "codepack_preview");
+        assert_eq!(call.arguments["project"], ".");
+    }
+
+    /// Everything else falls through to the ordinary handler, which already knows how to
+    /// say what is wrong with it.
+    #[test]
+    fn anything_that_is_not_a_tool_call_falls_through() {
+        for line in [
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"x"}}"#, // a notification
+            r#"{"jsonrpc":"1.0","id":1,"method":"tools/call","params":{"name":"x"}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call"}"#, // no params
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{}}"#, // no name
+            "not json",
+        ] {
+            assert!(pending_tool_call(line).is_none(), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_cancellation_matches_only_the_request_it_names() {
+        let for_seven =
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}"#;
+        assert!(cancels(for_seven, &json!(7)));
+        assert!(!cancels(for_seven, &json!(8)));
+        // A string id is a legal JSON-RPC id, and must match on its own terms.
+        let for_abc =
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"abc"}}"#;
+        assert!(cancels(for_abc, &json!("abc")));
+        assert!(!cancels(for_abc, &json!(7)));
+    }
+
+    #[test]
+    fn anything_that_is_not_a_cancellation_is_not_one() {
+        for line in [
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled"}"#, // no params
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            "not json",
+        ] {
+            assert!(!cancels(line, &json!(1)), "{line}");
+        }
+    }
+
+    /// A cancellation for a call that is already over is simply a notification: answered
+    /// with silence, never with an error.
+    #[test]
+    fn a_late_cancellation_is_answered_with_silence() {
+        let responses = drive(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n\
+             {\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":1}}\n",
+        );
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0]["id"], 1);
+    }
+
+    /// Messages that arrive while a call runs are queued and answered afterwards, in
+    /// order — the loop buys cancellation, not concurrency.
+    #[test]
+    fn messages_arriving_during_a_call_are_answered_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.py"), "print(1)\n").unwrap();
+        let project = dir.path().display().to_string().replace('\\', "\\\\");
+
+        let responses = drive(&format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"codepack_preview\",\"arguments\":{{\"project\":\"{project}\"}}}}}}\n\
+             {{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}}\n\
+             {{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}}\n"
+        ));
+
+        let ids: Vec<&Value> = responses.iter().map(|response| &response["id"]).collect();
+        assert_eq!(ids, vec![&json!(1), &json!(2), &json!(3)]);
+    }
+
+    #[test]
+    fn resources_are_listed_and_read_over_the_protocol() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("manifest.json"), "{\"listed\":true}").unwrap();
+        super::resources::register_bundle(dir.path(), None);
+
+        let responses = drive(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/list\"}\n\
+             {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"resources/read\",\"params\":{\"uri\":\"codepack://bundle/manifest.json\"}}\n",
+        );
+
+        let listed = responses[0]["result"]["resources"].as_array().unwrap();
+        assert!(
+            listed
+                .iter()
+                .any(|entry| entry["uri"] == "codepack://bundle/manifest.json"),
+            "{listed:?}"
+        );
+        assert_eq!(
+            responses[1]["result"]["contents"][0]["text"],
+            "{\"listed\":true}"
+        );
+    }
+
+    #[test]
+    fn reading_a_resource_that_is_not_registered_is_a_protocol_error() {
+        let responses = drive(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":\"file:///etc/passwd\"}}\n",
+        );
+        assert_eq!(responses[0]["error"]["code"], INVALID_PARAMS);
+    }
+
+    #[test]
+    fn reading_without_a_uri_says_what_is_missing() {
+        let responses =
+            drive("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/read\",\"params\":{}}\n");
+        assert_eq!(responses[0]["error"]["code"], INVALID_PARAMS);
+        assert!(
+            responses[0]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("uri")
+        );
     }
 }

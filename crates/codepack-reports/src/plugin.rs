@@ -350,4 +350,233 @@ mod tests {
         assert!(summary.succeeded.is_empty());
         assert!(!out_dir.path().join("never_runs.txt").exists());
     }
+
+    // --- Parallel execution (2026-09-05) --------------------------------------------
+    //
+    // The catalogue is run in phases: the profile first, the independent reports
+    // concurrently, the dashboard last. Only the middle phase goes through
+    // `run_reports_parallel`, and its whole obligation is to be indistinguishable from
+    // the sequential runner for jobs that are genuinely independent.
+
+    /// Builds a context over a throwaway project, so the tests below read as one line.
+    struct Fixture {
+        _project: tempfile::TempDir,
+        out_dir: tempfile::TempDir,
+        plan: codepack_scanner::ExportPlan,
+        config: Config,
+        cancel: CancellationToken,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let project = tempfile::tempdir().unwrap();
+            std::fs::write(project.path().join("main.py"), "x = 1\n").unwrap();
+            let (plan, config, cancel) = fixture_ctx(project.path());
+            Self {
+                _project: project,
+                out_dir: tempfile::tempdir().unwrap(),
+                plan,
+                config,
+                cancel,
+            }
+        }
+
+        fn context<'a>(&'a self, inventory: &'a Inventory) -> ReportContext<'a> {
+            ReportContext {
+                source_root: self._project.path().to_path_buf(),
+                staging_root: self._project.path().to_path_buf(),
+                inventory,
+                plan: &self.plan,
+                scan: None,
+                diff: None,
+                config: &self.config,
+                cancel: &self.cancel,
+                profile: "full",
+            }
+        }
+    }
+
+    fn many_jobs() -> Vec<ReportJob> {
+        vec![
+            ok_job("01_a.txt", profile::ALL_PROFILES),
+            failing_job("02_fails.txt"),
+            ok_job("03_c.txt", profile::ALL_PROFILES),
+            panicking_job("04_panics.txt"),
+            ok_job("05_e.txt", profile::ALL_PROFILES),
+        ]
+    }
+
+    /// The obligation in one assertion: same jobs, same context, same summary — in the
+    /// same order, not merely the same set.
+    #[test]
+    fn the_parallel_runner_reports_exactly_what_the_sequential_one_does() {
+        let fixture = Fixture::new();
+        let inventory = Inventory::from_plan(&fixture.plan);
+        let ctx = fixture.context(&inventory);
+
+        let sequential = run_reports(&many_jobs(), &ctx, fixture.out_dir.path());
+        let parallel_out = tempfile::tempdir().unwrap();
+        let parallel = run_reports_parallel(&many_jobs(), &ctx, parallel_out.path());
+
+        assert_eq!(parallel.succeeded, sequential.succeeded);
+        assert_eq!(parallel.skipped, sequential.skipped);
+        assert_eq!(parallel.cancelled, sequential.cancelled);
+        assert_eq!(
+            parallel
+                .failed
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>(),
+            sequential
+                .failed
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn a_failing_or_panicking_job_still_leaves_its_error_file() {
+        let fixture = Fixture::new();
+        let inventory = Inventory::from_plan(&fixture.plan);
+        let ctx = fixture.context(&inventory);
+
+        let summary = run_reports_parallel(&many_jobs(), &ctx, fixture.out_dir.path());
+
+        assert_eq!(summary.failed.len(), 2);
+        assert!(
+            fixture
+                .out_dir
+                .path()
+                .join("ERROR_02_fails.txt.txt")
+                .exists()
+        );
+        let panicked =
+            std::fs::read_to_string(fixture.out_dir.path().join("ERROR_04_panics.txt.txt"))
+                .unwrap();
+        assert!(panicked.contains("deliberate test panic"));
+        // And every independent job still produced its own output.
+        assert!(fixture.out_dir.path().join("01_a.txt").exists());
+        assert!(fixture.out_dir.path().join("05_e.txt").exists());
+    }
+
+    #[test]
+    fn a_job_outside_the_profile_is_skipped_not_run() {
+        let fixture = Fixture::new();
+        let inventory = Inventory::from_plan(&fixture.plan);
+        // `full` runs everything, so gating is only observable from a narrower profile.
+        let ctx = ReportContext {
+            profile: "minimal",
+            ..fixture.context(&inventory)
+        };
+
+        let jobs = vec![
+            ok_job("quick_only.txt", &["quick"]),
+            ok_job("minimal_ok.txt", &["minimal"]),
+        ];
+        let summary = run_reports_parallel(&jobs, &ctx, fixture.out_dir.path());
+
+        assert_eq!(summary.skipped, vec!["quick_only.txt"]);
+        assert_eq!(summary.succeeded, vec!["minimal_ok.txt"]);
+        assert!(!fixture.out_dir.path().join("quick_only.txt").exists());
+    }
+
+    #[test]
+    fn cancellation_stops_the_parallel_phase_too() {
+        let fixture = Fixture::new();
+        fixture.cancel.cancel();
+        let inventory = Inventory::from_plan(&fixture.plan);
+        let ctx = fixture.context(&inventory);
+
+        let summary = run_reports_parallel(&many_jobs(), &ctx, fixture.out_dir.path());
+
+        assert!(summary.cancelled);
+        assert!(summary.succeeded.is_empty());
+        assert!(!fixture.out_dir.path().join("01_a.txt").exists());
+    }
+
+    /// Repeated runs must produce the same summary, or a run's log would depend on which
+    /// thread happened to finish first.
+    #[test]
+    fn the_summary_does_not_depend_on_completion_order() {
+        let fixture = Fixture::new();
+        let inventory = Inventory::from_plan(&fixture.plan);
+        let ctx = fixture.context(&inventory);
+
+        let first = run_reports_parallel(&many_jobs(), &ctx, fixture.out_dir.path());
+        for _ in 0..10 {
+            let out = tempfile::tempdir().unwrap();
+            let again = run_reports_parallel(&many_jobs(), &ctx, out.path());
+            assert_eq!(again.succeeded, first.succeeded);
+            assert_eq!(again.skipped, first.skipped);
+            assert_eq!(
+                again
+                    .failed
+                    .iter()
+                    .map(|(name, _)| *name)
+                    .collect::<Vec<_>>(),
+                first
+                    .failed
+                    .iter()
+                    .map(|(name, _)| *name)
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_phase_is_an_empty_summary() {
+        let fixture = Fixture::new();
+        let inventory = Inventory::from_plan(&fixture.plan);
+        let ctx = fixture.context(&inventory);
+
+        let summary = run_reports_parallel(&[], &ctx, fixture.out_dir.path());
+        assert!(summary.succeeded.is_empty());
+        assert!(summary.failed.is_empty());
+        assert!(summary.skipped.is_empty());
+        assert!(!summary.cancelled);
+    }
+
+    /// Phases are folded into one summary, and the caller must see all of it.
+    #[test]
+    fn absorbing_a_phase_keeps_every_outcome_and_the_phase_order() {
+        let mut first = RunSummary {
+            succeeded: vec!["a"],
+            failed: vec![("b", "boom".to_string())],
+            skipped: vec!["c"],
+            cancelled: false,
+            diagnostic_write_failures: vec!["d"],
+        };
+        first.absorb(RunSummary {
+            succeeded: vec!["e"],
+            failed: vec![("f", "bang".to_string())],
+            skipped: vec!["g"],
+            cancelled: true,
+            diagnostic_write_failures: vec!["h"],
+        });
+
+        assert_eq!(first.succeeded, vec!["a", "e"]);
+        assert_eq!(first.skipped, vec!["c", "g"]);
+        assert_eq!(first.diagnostic_write_failures, vec!["d", "h"]);
+        assert_eq!(
+            first
+                .failed
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>(),
+            vec!["b", "f"]
+        );
+        // One cancelled phase cancels the run.
+        assert!(first.cancelled);
+    }
+
+    #[test]
+    fn absorbing_an_uncancelled_phase_does_not_clear_a_cancellation() {
+        let mut first = RunSummary {
+            cancelled: true,
+            ..RunSummary::default()
+        };
+        first.absorb(RunSummary::default());
+        assert!(first.cancelled);
+    }
 }

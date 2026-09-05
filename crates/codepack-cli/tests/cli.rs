@@ -1847,3 +1847,179 @@ fn the_server_survives_a_malformed_message_and_keeps_answering() {
     assert_eq!(responses[1]["error"]["code"], -32700);
     assert_eq!(responses[2]["id"], 2);
 }
+
+// --- scan --baseline (2026-09-05) ---------------------------------------------------
+
+/// The question a team has on day one: fail on the next finding, not on the ones that
+/// were already here.
+#[test]
+fn a_recorded_baseline_holds_back_what_it_recorded() {
+    let sandbox = Sandbox::new().with_secret();
+    let project = sandbox.project().display().to_string();
+    let baseline = sandbox.out().join("baseline.json").display().to_string();
+
+    // Before: the secret is reported and gates.
+    let before = sandbox.run(&["scan", &project, "--json"]);
+    assert_eq!(code(&before), 3, "a critical finding must gate");
+    let before_total = json(&before)["summary"]["total_findings"].as_u64().unwrap();
+    assert!(before_total > 0);
+
+    // Record it.
+    let recorded = sandbox.run(&["scan", &project, "--write-baseline", &baseline]);
+    assert_eq!(
+        code(&recorded),
+        3,
+        "recording does not change this run's verdict"
+    );
+    assert!(Path::new(&baseline).is_file());
+
+    // After: nothing new, so nothing to report and nothing to fail on.
+    let after = sandbox.run(&["scan", &project, "--baseline", &baseline, "--json"]);
+    assert_eq!(code(&after), 0, "stdout: {}", stdout(&after));
+    let payload = json(&after);
+    assert_eq!(payload["summary"]["total_findings"], 0);
+    assert_eq!(
+        payload["baselined"].as_array().unwrap().len() as u64,
+        before_total
+    );
+    assert!(
+        payload["baseline"]
+            .as_str()
+            .unwrap()
+            .contains("baseline.json")
+    );
+}
+
+/// And a finding that arrived after the baseline was taken is exactly what should get
+/// through it.
+#[test]
+fn a_new_finding_is_not_held_back_by_an_older_baseline() {
+    let sandbox = Sandbox::new().with_secret();
+    let project = sandbox.project().display().to_string();
+    let baseline = sandbox.out().join("baseline.json").display().to_string();
+
+    sandbox.run(&["scan", &project, "--write-baseline", &baseline]);
+
+    // A second credential appears, in a file the baseline never saw.
+    std::fs::write(
+        sandbox.project().join("src").join("settings.py"),
+        "DATABASE_URL = \"postgres://user:hunter2hunter2@db.internal/app\"\n",
+    )
+    .unwrap();
+
+    let after = sandbox.run(&["scan", &project, "--baseline", &baseline, "--json"]);
+    let payload = json(&after);
+    assert!(
+        payload["summary"]["total_findings"].as_u64().unwrap() > 0,
+        "the new finding must survive the baseline: {payload}"
+    );
+}
+
+#[test]
+fn the_human_output_says_a_baseline_was_used() {
+    let sandbox = Sandbox::new().with_secret();
+    let project = sandbox.project().display().to_string();
+    let baseline = sandbox.out().join("baseline.json").display().to_string();
+    sandbox.run(&["scan", &project, "--write-baseline", &baseline]);
+
+    let after = sandbox.run(&["scan", &project, "--baseline", &baseline]);
+    let text = stdout(&after);
+    assert!(text.contains("Baseline:"), "{text}");
+    assert!(text.contains("already recorded"), "{text}");
+}
+
+#[test]
+fn a_missing_baseline_file_is_an_error_rather_than_a_silent_pass() {
+    let sandbox = Sandbox::new().with_secret();
+    let project = sandbox.project().display().to_string();
+    let absent = sandbox.out().join("nope.json").display().to_string();
+
+    let output = sandbox.run(&["scan", &project, "--baseline", &absent]);
+    assert_eq!(code(&output), 1, "stderr: {}", stderr(&output));
+}
+
+/// `.codepack-allow` means "reviewed"; a baseline means "already present". They stack,
+/// and the report keeps them apart.
+#[test]
+fn an_allowlist_and_a_baseline_are_reported_separately() {
+    let sandbox = Sandbox::new().with_secret();
+    let project = sandbox.project().display().to_string();
+
+    // Accept the first finding through the allowlist.
+    let listed = json(&sandbox.run(&["scan", &project, "--json"]));
+    let fingerprint = listed["findings"][0]["fingerprint"].as_str().unwrap();
+    std::fs::write(
+        sandbox.project().join(".codepack-allow"),
+        format!("[[allow]]\nfingerprint = \"{fingerprint}\"\nreason = \"reviewed\"\n"),
+    )
+    .unwrap();
+
+    let baseline = sandbox.out().join("baseline.json").display().to_string();
+    sandbox.run(&["scan", &project, "--write-baseline", &baseline]);
+
+    let payload = json(&sandbox.run(&["scan", &project, "--baseline", &baseline, "--json"]));
+    assert_eq!(
+        payload["suppressed"].as_array().unwrap().len(),
+        1,
+        "the allowlist keeps its own list: {payload}"
+    );
+    assert!(payload["baselined"].is_array());
+    assert_eq!(payload["summary"]["total_findings"], 0);
+}
+
+/// The baseline records what survives the allowlist, so an accepted finding is not
+/// frozen twice.
+#[test]
+fn a_baseline_does_not_record_what_the_allowlist_already_accepts() {
+    let sandbox = Sandbox::new().with_secret();
+    let project = sandbox.project().display().to_string();
+
+    let listed = json(&sandbox.run(&["scan", &project, "--json"]));
+    let all = listed["summary"]["total_findings"].as_u64().unwrap();
+    let fingerprint = listed["findings"][0]["fingerprint"].as_str().unwrap();
+    std::fs::write(
+        sandbox.project().join(".codepack-allow"),
+        format!("[[allow]]\nfingerprint = \"{fingerprint}\"\nreason = \"reviewed\"\n"),
+    )
+    .unwrap();
+
+    let baseline = sandbox.out().join("baseline.json").display().to_string();
+    sandbox.run(&["scan", &project, "--write-baseline", &baseline]);
+
+    let body = std::fs::read_to_string(&baseline).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        parsed["fingerprints"].as_array().unwrap().len() as u64,
+        all - 1
+    );
+    assert!(!body.contains(fingerprint));
+}
+
+// --- init --hook --strict (Q35) ------------------------------------------------------
+
+#[test]
+fn the_strict_hook_is_installed_and_says_so() {
+    let sandbox = Sandbox::new();
+    git2::Repository::init(sandbox.project()).unwrap();
+    let project = sandbox.project().display().to_string();
+
+    let output = sandbox.run(&["init", &project, "--hook", "--strict", "--json"]);
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+
+    let payload = json(&output);
+    assert_eq!(payload["strict"], true);
+    let hook = std::fs::read_to_string(payload["hook"].as_str().unwrap()).unwrap();
+    assert!(hook.contains("exit 1"));
+}
+
+#[test]
+fn the_default_hook_is_still_the_permissive_one() {
+    let sandbox = Sandbox::new();
+    git2::Repository::init(sandbox.project()).unwrap();
+    let project = sandbox.project().display().to_string();
+
+    let payload = json(&sandbox.run(&["init", &project, "--hook", "--json"]));
+    assert_eq!(payload["strict"], false);
+    let hook = std::fs::read_to_string(payload["hook"].as_str().unwrap()).unwrap();
+    assert!(hook.contains("NOT checked"));
+}

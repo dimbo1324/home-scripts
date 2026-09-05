@@ -106,3 +106,70 @@ pub fn encode(findings: &[CachedFinding]) -> Option<String> {
 pub fn decode(stored: &str) -> Option<Vec<CachedFinding>> {
     serde_json::from_str(stored).ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn finding(line: usize, rule: &str) -> CachedFinding {
+        CachedFinding {
+            kind: FindingKind::PotentialSecret,
+            severity: "high".to_string(),
+            confidence: "high".to_string(),
+            line,
+            rule: rule.to_string(),
+            message: "KEY=<REDACTED>".to_string(),
+        }
+    }
+
+    #[test]
+    fn the_same_bytes_under_the_same_options_key_the_same() {
+        assert_eq!(cache_key(b"hello", false), cache_key(b"hello", false));
+    }
+
+    #[test]
+    fn different_bytes_key_differently() {
+        assert_ne!(cache_key(b"hello", false), cache_key(b"hellp", false));
+    }
+
+    /// The trap this key exists to avoid, in miniature: an option that changes a verdict
+    /// must change the key, or a run with it on would be served a verdict computed with
+    /// it off.
+    #[test]
+    fn an_option_that_changes_a_verdict_changes_the_key() {
+        assert_ne!(cache_key(b"hello", false), cache_key(b"hello", true));
+    }
+
+    #[test]
+    fn a_key_is_hex_and_fixed_width() {
+        let key = cache_key(b"anything", false);
+        assert_eq!(key.len(), 64, "sha-256 in hex");
+        assert!(key.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn empty_content_still_has_a_key() {
+        // A file with nothing in it is the most cacheable case there is.
+        assert_eq!(cache_key(b"", false).len(), 64);
+    }
+
+    #[test]
+    fn encoding_round_trips() {
+        let findings = vec![finding(3, "secret_like_line"), finding(9, "github-token")];
+        let stored = encode(&findings).expect("serialisable");
+        assert_eq!(decode(&stored).as_deref(), Some(findings.as_slice()));
+    }
+
+    #[test]
+    fn an_empty_entry_round_trips_too() {
+        // "These bytes contain nothing" is the answer worth most, being the common one.
+        let stored = encode(&[]).expect("serialisable");
+        assert_eq!(decode(&stored), Some(Vec::new()));
+    }
+
+    #[test]
+    fn a_row_from_another_build_is_ignored_rather_than_fatal() {
+        assert!(decode("not json at all").is_none());
+        assert!(decode(r#"[{"kind":"unheard_of_kind"}]"#).is_none());
+    }
+}

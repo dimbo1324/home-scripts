@@ -80,6 +80,54 @@ pub fn root_entry_exists(root: &Path, name: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// Every report reaches the artifact language the same way, so the one method has
+    /// to answer from the configuration it was handed rather than from a default.
+    #[test]
+    fn the_context_reports_the_configured_artifact_language() {
+        use codepack_core::config::Config;
+        use codepack_scanner::{ExportIgnoreRules, ScanOptions, build_export_plan};
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("main.py"),
+            "x = 1
+",
+        )
+        .unwrap();
+        let cancel = CancellationToken::new();
+        let plan = build_export_plan(
+            dir.path(),
+            &ScanOptions::default(),
+            &ExportIgnoreRules::default(),
+            &codepack_scanner::no_safety_classification,
+            &cancel,
+        )
+        .unwrap();
+        let inventory = Inventory::from_plan(&plan);
+
+        for (setting, expected) in [
+            ("en", crate::i18n::Language::En),
+            ("ru", crate::i18n::Language::Ru),
+        ] {
+            let config = Config {
+                artifact_language: setting.to_string(),
+                ..Config::default()
+            };
+            let ctx = ReportContext {
+                source_root: dir.path().to_path_buf(),
+                staging_root: dir.path().to_path_buf(),
+                inventory: &inventory,
+                plan: &plan,
+                scan: None,
+                diff: None,
+                config: &config,
+                cancel: &cancel,
+                profile: "full",
+            };
+            assert_eq!(ctx.artifact_language(), expected, "setting {setting}");
+        }
+    }
+
     /// Invariant I3 is absolute, and `redact_line` is the single gate every report that
     /// quotes file content passes through — so the choice of the *stronger* redaction
     /// function is itself worth pinning, not just the fact that redaction happens.

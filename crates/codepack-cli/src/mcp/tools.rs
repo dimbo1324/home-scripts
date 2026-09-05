@@ -431,7 +431,10 @@ fn export(arguments: &Value, cancel: &CancellationToken) -> ToolOutcome {
             // The bundle's own reports become readable over the same pipe, so an agent
             // that just produced thirty analyses does not have to leave the protocol to
             // look at one.
-            super::resources::register_bundle(std::path::Path::new(&report.staging_dir));
+            super::resources::register_bundle(
+                std::path::Path::new(&report.staging_dir),
+                report.result_path.as_deref().map(std::path::Path::new),
+            );
             into_outcome(&report)
         }
         Err(error) => ToolOutcome::error(error.to_string()),

@@ -179,3 +179,94 @@ fn write_checksums(bundle: &Path) -> Result<PathBuf, String> {
         .map_err(|error| format!("cannot write {}: {error}", target.display()))?;
     Ok(target)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The SHA-256 of the empty input, from the standard's own test vectors. It pins the
+    /// digest this file publishes, rather than only pinning it against itself.
+    const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    #[test]
+    fn checksums_are_written_in_the_format_sha256sum_reads() {
+        let bundle = tempfile::tempdir().unwrap();
+        std::fs::write(bundle.path().join("codepack_setup.exe"), b"").unwrap();
+
+        let written = write_checksums(bundle.path()).unwrap();
+        assert_eq!(written, bundle.path().join(CHECKSUM_FILE));
+
+        let body = std::fs::read_to_string(&written).unwrap();
+        assert_eq!(body, format!("{EMPTY_SHA256}  codepack_setup.exe\n"));
+    }
+
+    /// Names, never paths: the file is published beside the installers and verified from
+    /// the directory it sits in.
+    #[test]
+    fn entries_carry_the_file_name_alone() {
+        let bundle = tempfile::tempdir().unwrap();
+        std::fs::write(bundle.path().join("installer.exe"), b"payload").unwrap();
+
+        let body = std::fs::read_to_string(write_checksums(bundle.path()).unwrap()).unwrap();
+        assert!(body.ends_with("  installer.exe\n"), "{body}");
+        assert!(!body.contains(std::path::MAIN_SEPARATOR), "{body}");
+    }
+
+    /// Sorted, so the same set of files always produces the same file.
+    #[test]
+    fn entries_are_sorted_and_the_output_is_stable() {
+        let bundle = tempfile::tempdir().unwrap();
+        for name in ["c.exe", "a.exe", "b.exe"] {
+            std::fs::write(bundle.path().join(name), name.as_bytes()).unwrap();
+        }
+
+        let first = std::fs::read_to_string(write_checksums(bundle.path()).unwrap()).unwrap();
+        let names: Vec<&str> = first
+            .lines()
+            .map(|line| line.split_whitespace().nth(1).unwrap())
+            .collect();
+        assert_eq!(names, ["a.exe", "b.exe", "c.exe"]);
+
+        // Re-running over the same directory reproduces it exactly, including the fact
+        // that the previous SHA256SUMS.txt is not hashed into the new one.
+        let second = std::fs::read_to_string(write_checksums(bundle.path()).unwrap()).unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn the_checksum_file_never_hashes_itself() {
+        let bundle = tempfile::tempdir().unwrap();
+        std::fs::write(bundle.path().join("installer.exe"), b"x").unwrap();
+        std::fs::write(bundle.path().join(CHECKSUM_FILE), "stale\n").unwrap();
+
+        let body = std::fs::read_to_string(write_checksums(bundle.path()).unwrap()).unwrap();
+        assert_eq!(body.lines().count(), 1);
+        assert!(!body.contains(CHECKSUM_FILE));
+    }
+
+    #[test]
+    fn a_directory_is_not_an_artifact() {
+        let bundle = tempfile::tempdir().unwrap();
+        std::fs::create_dir(bundle.path().join("nested")).unwrap();
+        std::fs::write(bundle.path().join("installer.exe"), b"x").unwrap();
+
+        let body = std::fs::read_to_string(write_checksums(bundle.path()).unwrap()).unwrap();
+        assert_eq!(body.lines().count(), 1);
+        assert!(body.ends_with("  installer.exe\n"));
+    }
+
+    #[test]
+    fn an_empty_bundle_still_writes_a_file_rather_than_nothing() {
+        let bundle = tempfile::tempdir().unwrap();
+        let body = std::fs::read_to_string(write_checksums(bundle.path()).unwrap()).unwrap();
+        assert_eq!(body, "\n");
+    }
+
+    #[test]
+    fn a_directory_that_is_not_there_is_an_error_that_names_it() {
+        let bundle = tempfile::tempdir().unwrap();
+        let missing = bundle.path().join("absent");
+        let error = write_checksums(&missing).unwrap_err();
+        assert!(error.contains("absent"), "{error}");
+    }
+}

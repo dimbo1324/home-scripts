@@ -372,4 +372,86 @@ mod tests {
         assert!(HOOK_SCRIPT.contains("exit 0"));
         assert!(HOOK_SCRIPT.contains("NOT checked"));
     }
+
+    // --- The strict hook (Q35, 2026-09-05) ------------------------------------------
+
+    #[test]
+    fn the_permissive_hook_lets_an_unchecked_commit_through() {
+        let dir = tempfile::tempdir().unwrap();
+        repository(dir.path());
+        let report = install_hook_with(dir.path(), false, false).unwrap();
+
+        assert!(!report.strict);
+        let body = std::fs::read_to_string(&report.hook).unwrap();
+        assert!(body.contains("command -v codepack"));
+        assert!(body.contains("NOT checked"));
+        assert!(
+            body.contains("exit 0"),
+            "a missing binary must not block the commit"
+        );
+    }
+
+    #[test]
+    fn the_strict_hook_refuses_a_commit_it_cannot_check() {
+        let dir = tempfile::tempdir().unwrap();
+        repository(dir.path());
+        let report = install_hook_with(dir.path(), false, true).unwrap();
+
+        assert!(report.strict);
+        let body = std::fs::read_to_string(&report.hook).unwrap();
+        assert!(body.contains("command -v codepack"));
+        assert!(body.contains("CANNOT be checked"));
+        assert!(body.contains("exit 1"), "strict means the commit stops");
+        assert!(body.contains(HOOK_MARKER), "still ours to update later");
+    }
+
+    /// Both hooks do the same thing when the binary *is* there: only the missing-binary
+    /// answer differs.
+    #[test]
+    fn both_hooks_run_the_same_check_when_codepack_is_installed() {
+        let permissive = tempfile::tempdir().unwrap();
+        repository(permissive.path());
+        let strict = tempfile::tempdir().unwrap();
+        repository(strict.path());
+
+        let one = std::fs::read_to_string(
+            install_hook_with(permissive.path(), false, false)
+                .unwrap()
+                .hook,
+        )
+        .unwrap();
+        let two =
+            std::fs::read_to_string(install_hook_with(strict.path(), false, true).unwrap().hook)
+                .unwrap();
+
+        for body in [&one, &two] {
+            assert!(body.contains("codepack scan --staged"));
+            assert!(body.contains(".codepack-allow"));
+        }
+    }
+
+    /// Reinstalling swaps the mode rather than refusing: both hooks carry the marker, so
+    /// each recognises the other as its own.
+    #[test]
+    fn a_hook_can_be_switched_between_modes_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        repository(dir.path());
+
+        install_hook_with(dir.path(), false, false).unwrap();
+        let report = install_hook_with(dir.path(), false, true).unwrap();
+        assert_eq!(report.action, "updated");
+        assert!(
+            std::fs::read_to_string(&report.hook)
+                .unwrap()
+                .contains("exit 1")
+        );
+
+        let back = install_hook_with(dir.path(), false, false).unwrap();
+        assert_eq!(back.action, "updated");
+        assert!(
+            std::fs::read_to_string(&back.hook)
+                .unwrap()
+                .contains("exit 0")
+        );
+    }
 }

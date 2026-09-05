@@ -15,5 +15,9 @@ publish.workspace = true
 [dependencies]
 sha2.workspace = true
 
+# Test-only: the checksum writer's tests need a throwaway bundle directory.
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true
