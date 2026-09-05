@@ -50,10 +50,8 @@ fn write_settings(path: &Path, config: &Config) -> Result<()> {
             source,
         })?;
     }
-    let json = serde_json::to_string_pretty(config).map_err(|source| CoreError::InvalidJson {
-        field: "Config",
-        source,
-    })?;
+    let json = serde_json::to_string_pretty(config)
+        .map_err(|source| CoreError::invalid_json("Config", &source))?;
     fs::write(path, format!("{json}\n")).map_err(|source| CoreError::Write {
         path: path.to_path_buf(),
         source,
@@ -75,22 +73,42 @@ pub fn import_settings(path: &Path) -> Result<Config> {
         source,
     })?;
     let mut value: Value =
-        serde_json::from_str(&text).map_err(|source| CoreError::InvalidJson {
-            field: "Config",
-            source,
-        })?;
+        serde_json::from_str(&text).map_err(|source| CoreError::invalid_json("Config", &source))?;
     if let Value::Object(data) = &mut value {
         migrate_legacy_settings(data);
     }
-    serde_json::from_value(value).map_err(|source| CoreError::InvalidJson {
-        field: "Config",
-        source,
-    })
+    serde_json::from_value(value).map_err(|source| CoreError::invalid_json("Config", &source))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `serde_json::Error`'s own `Display` quotes the offending value: `invalid type:
+    /// string "sk-live-…", expected a boolean`. That message is printed to stderr and
+    /// lands in a CI log, so the value must never be in it (audit No. 11).
+    #[test]
+    fn a_wrong_typed_setting_is_reported_by_position_not_by_quoting_its_value() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("settings.json");
+        fs::write(
+            &path,
+            "{
+  \"redact_secrets\": \"totally-fake-value-0001\"
+}",
+        )
+        .unwrap();
+
+        let error = import_settings(&path).expect_err("a string is not a boolean");
+        let rendered = error.to_string();
+
+        assert!(
+            !rendered.contains("totally-fake-value-0001"),
+            "the setting's value reached the message: {rendered}"
+        );
+        assert!(rendered.contains("line"), "{rendered}");
+        assert!(rendered.contains("column"), "{rendered}");
+    }
     use tempfile::tempdir;
 
     #[test]

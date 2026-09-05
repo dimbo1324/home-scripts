@@ -52,11 +52,8 @@ pub fn load(path: &Path) -> Result<LoadedProfiles> {
         path: path.to_path_buf(),
         source,
     })?;
-    let raw: serde_json::Value =
-        serde_json::from_str(&text).map_err(|source| CoreError::InvalidJson {
-            field: "user export profiles",
-            source,
-        })?;
+    let raw: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|source| CoreError::invalid_json("user export profiles", &source))?;
 
     let description = raw
         .get("description")
@@ -103,10 +100,8 @@ pub fn save(path: &Path, file: &UserProfilesFile) -> Result<()> {
             source,
         })?;
     }
-    let rendered = serde_json::to_string_pretty(file).map_err(|source| CoreError::InvalidJson {
-        field: "user export profiles",
-        source,
-    })?;
+    let rendered = serde_json::to_string_pretty(file)
+        .map_err(|source| CoreError::invalid_json("user export profiles", &source))?;
     std::fs::write(path, rendered).map_err(|source| CoreError::Write {
         path: path.to_path_buf(),
         source,

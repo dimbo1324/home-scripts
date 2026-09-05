@@ -159,16 +159,55 @@ pub fn run_reports_parallel(
     summary
 }
 
+/// Longest diagnostic message kept.
+///
+/// A panic message is arbitrary text from whatever called `panic!` or `expect`, so it
+/// can carry a serialized structure of any size. This is a diagnostic, not a data dump:
+/// four kibibytes is far more than a person reads and far less than a payload.
+const MAX_DIAGNOSTIC_BYTES: usize = 4 * 1024;
+
+/// Records a failed report job — the **single** point where a diagnostic message is
+/// kept, which is why the redaction belongs here rather than at each caller.
+///
+/// `message` is either a `ReportError` (which names the file it failed on) or a panic
+/// message (arbitrary text from inside a report job). Both used to be written verbatim
+/// into `ERROR_<name>.txt`, and that file goes **inside the bundle the user hands to
+/// somebody else**. Invariant I3 lists a report as a place a secret's value must never
+/// reach, and an ERROR file is a report (audit No. 12).
 fn record_failure(
     summary: &mut RunSummary,
     out_dir: &Path,
     filename: &'static str,
     message: String,
 ) {
+    let message = redact_diagnostic(&message);
     if write_error_file(out_dir, filename, &message).is_err() {
         summary.diagnostic_write_failures.push(filename);
     }
     summary.failed.push((filename, message));
+}
+
+/// Redacts a diagnostic message and bounds its length.
+///
+/// Line by line, because [`crate::context::redact_line`] is line-scoped and a panic
+/// message can span several. The truncation cuts on a character boundary — a message is
+/// diagnostic text, and slicing a multi-byte character in half would panic here, inside
+/// the code that exists to handle a panic.
+fn redact_diagnostic(message: &str) -> String {
+    let redacted: String = message
+        .lines()
+        .map(crate::context::redact_line)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if redacted.len() <= MAX_DIAGNOSTIC_BYTES {
+        return redacted;
+    }
+    let mut cut = MAX_DIAGNOSTIC_BYTES;
+    while cut > 0 && !redacted.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}\n[truncated]", &redacted[..cut])
 }
 
 /// Legacy: `safe_filename = filename.replace("/", "_").replace("\\", "_")`, then
@@ -194,6 +233,70 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Invariant I3 reaches the diagnostics too (audit No. 12) ----------------------
+
+    /// An `ERROR_*.txt` file is written *inside* the bundle the user hands out, so a
+    /// credential in a panic message or an error's file path leaves with it.
+    #[test]
+    fn a_failing_job_does_not_write_a_credential_into_the_bundle() {
+        let out_dir = tempfile::tempdir().unwrap();
+        let mut summary = RunSummary::default();
+
+        record_failure(
+            &mut summary,
+            out_dir.path(),
+            "01_summary.txt",
+            "panicked while reading API_KEY=totally-fake-value-0001".to_string(),
+        );
+
+        let written = std::fs::read_to_string(out_dir.path().join("ERROR_01_summary.txt.txt"))
+            .expect("the diagnostic file is written");
+        assert!(
+            !written.contains("totally-fake-value-0001"),
+            "the credential reached the bundle: {written}"
+        );
+        assert!(written.contains("<REDACTED>"), "{written}");
+        // The summary carries the same redacted text, so no unredacted copy survives in
+        // memory to be logged by a caller either.
+        assert!(!summary.failed[0].1.contains("totally-fake-value-0001"));
+    }
+
+    #[test]
+    fn a_multi_line_panic_message_is_redacted_on_every_line() {
+        let out_dir = tempfile::tempdir().unwrap();
+        let mut summary = RunSummary::default();
+
+        record_failure(
+            &mut summary,
+            out_dir.path(),
+            "02_x.txt",
+            "context line\nAPI_KEY=totally-fake-value-0002\nmore context".to_string(),
+        );
+
+        let written = std::fs::read_to_string(out_dir.path().join("ERROR_02_x.txt.txt")).unwrap();
+        assert!(!written.contains("totally-fake-value-0002"), "{written}");
+        assert!(written.contains("more context"), "{written}");
+    }
+
+    #[test]
+    fn an_enormous_panic_message_is_cut_down_rather_than_written_whole() {
+        let out_dir = tempfile::tempdir().unwrap();
+        let mut summary = RunSummary::default();
+        // Multi-byte characters, so a naive byte slice would panic inside the code that
+        // exists to survive a panic.
+        let huge = "п".repeat(MAX_DIAGNOSTIC_BYTES);
+
+        record_failure(&mut summary, out_dir.path(), "03_y.txt", huge);
+
+        let written = std::fs::read_to_string(out_dir.path().join("ERROR_03_y.txt.txt")).unwrap();
+        assert!(written.contains("[truncated]"), "the cut must be visible");
+        assert!(
+            written.len() < MAX_DIAGNOSTIC_BYTES + 128,
+            "{}",
+            written.len()
+        );
+    }
     use crate::context::{Inventory, ReportContext};
     use codepack_core::CancellationToken;
     use codepack_core::config::Config;
