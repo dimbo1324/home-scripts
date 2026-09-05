@@ -48,6 +48,51 @@ pub fn resolve_project_root(path: &str) -> CommandResult<PathBuf> {
     Ok(resolved)
 }
 
+/// Checks that a path really is an export this installation produced.
+///
+/// The paired rule to [`resolve_project_root`], and for the reason this module already
+/// states about project paths: "the frontend only ever sends back a path the native
+/// picker produced, but 'only ever' is a statement about today's UI, not about the
+/// boundary". Six commands took a `result_path` straight from the webview and used it to
+/// unpack archives and hand files to the OS opener — which is the whole of the isolation
+/// the capability file is there to provide, given away by the commands meant to hold it.
+///
+/// The check is against a *fact* rather than a shape: the history database records the
+/// `result_path` of every run, so a path is acceptable exactly when a run produced it.
+/// No amount of string cleverness can forge that.
+///
+/// Comparison is on canonicalised paths, so `.`-segments, a different case on Windows and
+/// a short 8.3 spelling all resolve to the same answer.
+pub fn resolve_export_result(result_path: &str) -> CommandResult<PathBuf> {
+    let raw = Path::new(result_path);
+    if raw.as_os_str().is_empty() {
+        return Err(CommandError::new("no export result was given"));
+    }
+    let resolved = raw.canonicalize().map_err(|_| {
+        CommandError::new(format!(
+            "the export result is no longer where it was recorded: {result_path}"
+        ))
+    })?;
+
+    let connection = open_database()?;
+    let runs =
+        codepack_storage::list_export_runs(&connection, None, 0).map_err(CommandError::new)?;
+    let known = runs.iter().any(|run| {
+        run.result_path
+            .as_deref()
+            .and_then(|recorded| Path::new(recorded).canonicalize().ok())
+            .is_some_and(|recorded| recorded == resolved)
+    });
+
+    if !known {
+        return Err(CommandError::new(format!(
+            "{} is not an export this installation produced, so it will not be opened",
+            resolved.display()
+        )));
+    }
+    Ok(resolved)
+}
+
 /// Opens the history database, creating it and its parent directory if needed.
 ///
 /// The path comes from `AppPaths`, never from the frontend: which database an export is
@@ -98,6 +143,36 @@ mod tests {
             error.message.contains("not a directory"),
             "unexpected message: {}",
             error.message
+        );
+    }
+}
+
+#[cfg(test)]
+mod export_result_tests {
+    use super::*;
+
+    /// The point of the check: a path the webview invents is refused, however well formed
+    /// it looks. A freshly created temporary file cannot be in anyone's export history.
+    #[test]
+    fn a_path_no_run_produced_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let stranger = dir.path().join("bundle.zip");
+        std::fs::write(&stranger, b"not a real export").unwrap();
+
+        let error = resolve_export_result(&stranger.display().to_string())
+            .expect_err("an unrecorded path must not be opened");
+        assert!(
+            format!("{error:?}").contains("not an export this installation produced"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_or_missing_path_is_refused_before_the_database_is_touched() {
+        assert!(resolve_export_result("").is_err());
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            resolve_export_result(&dir.path().join("absent.zip").display().to_string()).is_err()
         );
     }
 }

@@ -111,9 +111,14 @@ fn a_real_archive_is_extracted_and_read_from_the_inside() {
     assert_eq!(summary.project_type, "fullstack");
     assert_eq!(summary.files, 42);
 
-    // The extraction lands beside the archive, so the dashboard's relative links
-    // still resolve for the user afterwards.
-    assert!(out.path().join("demo_export_extracted").is_dir());
+    // Since audit No. 6 the extraction lands under the application's own data directory
+    // rather than beside the archive: writing a folder next to somebody's file is a
+    // liberty a command should not take. Where exactly is an implementation detail, so
+    // what is asserted is that nothing was written beside the archive.
+    assert!(
+        !out.path().join("demo_export_extracted").exists(),
+        "the archive's own directory must be left alone"
+    );
 }
 
 #[test]

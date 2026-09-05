@@ -32,6 +32,9 @@ tauri-build.workspace = true
 
 [dependencies]
 codepack-core.workspace = true
+# Audit No. 6: names a bundle's extraction directory by a hash of the archive path, so a
+# validated bundle is unpacked under the app's own data rather than beside somebody's file.
+sha2.workspace = true
 codepack-engine.workspace = true
 codepack-sanitize.workspace = true
 codepack-scanner.workspace = true

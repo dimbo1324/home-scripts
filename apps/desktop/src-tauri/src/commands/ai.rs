@@ -95,16 +95,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("AI_CONTEXT")).unwrap();
 
-        let result = prepare_handoff(
-            dir.path().display().to_string(),
-            "claude-code".to_string(),
-            "review the auth flow".to_string(),
-        )
-        .unwrap();
+        // Through `handoff::prepare` rather than the command: since audit No. 6 the
+        // command first checks that the path is an export this installation produced,
+        // and a temporary directory is deliberately not one. What is under test here is
+        // what gets written into a bundle, which is this half.
+        let agent = handoff::agent("claude-code").expect("a known agent");
+        let prepared = handoff::prepare(dir.path(), agent, "review the auth flow").unwrap();
 
-        assert_eq!(result.working_dir, dir.path().display().to_string());
-        assert_eq!(result.command, "claude");
-        let body = std::fs::read_to_string(&result.path).unwrap();
+        assert_eq!(prepared.working_dir, dir.path());
+        assert_eq!(prepared.command, "claude");
+        let body = std::fs::read_to_string(&prepared.path).unwrap();
         assert!(body.contains("review the auth flow"));
     }
 
@@ -123,6 +123,24 @@ mod tests {
             error.message.contains("no longer where it was recorded"),
             "{}",
             error.message
+        );
+    }
+
+    /// The guard the command gained: a directory nobody exported is not a bundle.
+    #[test]
+    fn preparing_refuses_a_path_no_run_produced() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("AI_CONTEXT")).unwrap();
+
+        let error = prepare_handoff(
+            dir.path().display().to_string(),
+            "claude-code".to_string(),
+            "review the auth flow".to_string(),
+        )
+        .expect_err("an unrecorded path must not be opened");
+        assert!(
+            format!("{error:?}").contains("not an export this installation produced"),
+            "{error:?}"
         );
     }
 }

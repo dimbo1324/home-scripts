@@ -232,13 +232,28 @@ pub fn cancel_export(state: State<'_, AppState>, run_id: String) -> CommandResul
 /// call returns and the user can browse them. Extracting again over an existing
 /// directory is harmless and keeps the copy current.
 pub(crate) fn extracted_bundle_dir(result_path: &str) -> CommandResult<std::path::PathBuf> {
-    let path = std::path::Path::new(result_path);
+    // The single gate for five of the six commands that used to take this path on trust.
+    // Validated against the export history first: a path is acceptable exactly when a run
+    // of this installation produced it.
+    let path = super::resolve_export_result(result_path)?;
+    extract_validated_bundle(&path, result_path)
+}
 
+/// The extraction itself, once the path is known to be an export this installation
+/// produced.
+///
+/// Separated from the check so the two can be read — and tested — apart: this function
+/// decides *how* a bundle is opened, and its caller decides *whether* it may be. Nothing
+/// but [`extracted_bundle_dir`] should call it.
+fn extract_validated_bundle(
+    path: &std::path::Path,
+    result_path: &str,
+) -> CommandResult<std::path::PathBuf> {
     // A split export hands back the archive-set *directory*; a single-ZIP export hands
     // back the file.
     if path.is_dir() {
         if path.join("ARCHIVE_SET_MANIFEST.json").is_file() {
-            let destination = path.join("_extracted");
+            let destination = extraction_dir_for(path)?;
             codepack_archive::restore_archive_set(path, &destination).map_err(CommandError::new)?;
             return Ok(destination);
         }
@@ -252,19 +267,40 @@ pub(crate) fn extracted_bundle_dir(result_path: &str) -> CommandResult<std::path
         )));
     }
 
-    let parent = path
-        .parent()
-        .ok_or_else(|| CommandError::new("the result path has no parent directory"))?;
-    let stem = path
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "bundle".to_string());
-    let destination = parent.join(format!("{stem}_extracted"));
-
+    let destination = extraction_dir_for(path)?;
     // `extract_zip_safely` validates every entry against path traversal before writing
-    // (`codepack-archive`'s own dual check), which matters here because the archive may
-    // have been moved or replaced since the export wrote it.
+    // and now also bounds what the archive may expand into.
     codepack_archive::extract_zip_safely(path, &destination).map_err(CommandError::new)?;
+    Ok(destination)
+}
+
+/// Where a bundle is unpacked for reading.
+///
+/// Under the application's own data directory rather than beside the archive. Writing a
+/// `_extracted` folder next to somebody's file is a liberty a command should not take —
+/// the user never opens that folder by hand, and the archive may sit anywhere. The name
+/// is a hash of the archive's path, so two bundles never collide and re-opening the same
+/// one reuses its directory.
+fn extraction_dir_for(archive: &std::path::Path) -> CommandResult<std::path::PathBuf> {
+    use sha2::{Digest, Sha256};
+
+    let paths = codepack_core::AppPaths::resolve().map_err(CommandError::new)?;
+    let mut hasher = Sha256::new();
+    hasher.update(archive.to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    let mut key = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        use std::fmt::Write as _;
+        let _ = write!(key, "{byte:02x}");
+    }
+
+    let destination = paths.settings_dir().join("extracted").join(key);
+    std::fs::create_dir_all(&destination).map_err(|source| {
+        CommandError::new(format!(
+            "cannot prepare {}: {source}",
+            destination.display()
+        ))
+    })?;
     Ok(destination)
 }
 
@@ -302,7 +338,7 @@ fn find_in_bundle(bundle_dir: &std::path::Path, relative: &[&str]) -> Option<std
 pub fn read_project_profile(
     result_path: String,
 ) -> CommandResult<crate::dto::ProjectProfileSummary> {
-    let bundle_dir = extracted_bundle_dir(&result_path)?;
+    let bundle_dir = extract_validated_bundle(std::path::Path::new(&result_path), &result_path)?;
     let profile_file = find_in_bundle(&bundle_dir, &["PROJECT_PROFILE.json"]).ok_or_else(|| {
         CommandError::new(
             "this export contains no PROJECT_PROFILE.json; the run may have been cancelled \
@@ -354,10 +390,27 @@ fn open_bundle_report(
     candidates: &[&str],
     not_found_message: &str,
 ) -> CommandResult<()> {
-    let bundle_dir = extracted_bundle_dir(result_path)?;
+    let bundle_dir = extract_validated_bundle(std::path::Path::new(result_path), result_path)?;
     let file = find_in_bundle(&bundle_dir, candidates)
         .ok_or_else(|| CommandError::new(not_found_message.to_string()))?;
-    tauri_plugin_opener::open_path(file.display().to_string(), None::<&str>)
+
+    // Handing a path to the OS handler is the most powerful thing this shell does, so the
+    // file is confined to the directory that was just validated and extracted. The lookup
+    // walks subdirectories, and a symlink inside an archive would otherwise be a way out
+    // of it — the containment is checked on canonicalised paths rather than assumed from
+    // how the lookup happens to work today.
+    let resolved = file
+        .canonicalize()
+        .map_err(|source| CommandError::new(format!("cannot open {}: {source}", file.display())))?;
+    let root = bundle_dir.canonicalize().unwrap_or(bundle_dir);
+    if !resolved.starts_with(&root) {
+        return Err(CommandError::new(format!(
+            "{} lies outside the extracted bundle and will not be opened",
+            resolved.display()
+        )));
+    }
+
+    tauri_plugin_opener::open_path(resolved.display().to_string(), None::<&str>)
         .map_err(CommandError::new)
 }
 
