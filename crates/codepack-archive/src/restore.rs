@@ -484,3 +484,112 @@ mod tests {
         assert!(limits.max_entries >= 100_000);
     }
 }
+
+#[cfg(test)]
+mod ambiguous_member_names {
+    //! Member names where the safe answer is not obvious.
+    //!
+    //! A zip stores names as text, and what counts as a separator, a reserved word or an
+    //! empty segment differs by platform. Each test below pins the decision this crate
+    //! makes rather than leaving it to whoever reads `safe_member_target` next.
+
+    use super::*;
+
+    /// The specification says `/`. Windows also treats `\` as one, so a member named
+    /// `a\..\..\evil` would traverse on Windows while looking like a single innocent
+    /// file name to a `/`-only check.
+    ///
+    /// `Path::components` is platform-dependent here, which is the whole difficulty: on
+    /// Windows it splits the backslash and the traversal is caught; on Unix the name is
+    /// one component and lands as a literal file inside the destination. Either way it
+    /// does not escape, and that is what this asserts — the outcome, not the mechanism.
+    #[test]
+    fn a_backslash_in_a_member_name_never_escapes_the_destination() {
+        let destination = Path::new("/dest");
+        for name in [r"a\..\..\evil.txt", r"..\..\evil.txt", r"a\b\..\..\..\evil"] {
+            match safe_member_target(destination, name) {
+                Err(_) => {}
+                Ok(target) => assert!(
+                    target.starts_with(destination),
+                    "{name} resolved outside the destination: {target:?}"
+                ),
+            }
+        }
+    }
+
+    /// A name that is only separators, or empty, has no components at all. Joining
+    /// nothing onto the destination yields the destination itself — a directory, which
+    /// the extractor would then try to open as a file. Refusing is not required for
+    /// safety here, but the target must at least stay inside.
+    #[test]
+    fn a_degenerate_name_stays_inside_the_destination() {
+        let destination = Path::new("/dest");
+        for name in ["", "/", "//", "./"] {
+            if let Ok(target) = safe_member_target(destination, name) {
+                assert!(target.starts_with(destination), "{name:?} -> {target:?}");
+            }
+        }
+    }
+
+    /// Windows reserved device names are not a traversal, and this crate does not treat
+    /// them as one: extraction fails on the write, honestly, rather than being refused
+    /// here on a platform where the name is perfectly ordinary. Pinned so nobody
+    /// "fixes" it into a refusal that would reject a legitimate Unix-authored bundle.
+    #[test]
+    fn a_windows_device_name_is_not_treated_as_traversal() {
+        let destination = Path::new("/dest");
+        for name in ["CON", "nul.txt", "aux/readme.md"] {
+            let target = safe_member_target(destination, name).expect("not a traversal");
+            assert!(target.starts_with(destination));
+        }
+    }
+
+    /// A name whose every segment is legal but which nests very deeply is not an escape,
+    /// and is accepted — the depth ceiling that matters is the byte budget, not the path.
+    #[test]
+    fn deep_nesting_is_allowed_because_it_does_not_escape() {
+        let destination = Path::new("/dest");
+        let deep = vec!["a"; 64].join("/");
+        let target = safe_member_target(destination, &deep).expect("legal, if silly");
+        assert!(target.starts_with(destination));
+    }
+
+    /// Non-ASCII names are ordinary. The product ships Russian-named artifacts, so a
+    /// check that quietly assumed ASCII would refuse this crate's own output.
+    #[test]
+    fn a_non_ascii_member_name_is_ordinary() {
+        let destination = Path::new("/dest");
+        let target = safe_member_target(destination, "reports/отчёт.md").expect("ordinary");
+        assert!(target.ends_with("отчёт.md"));
+    }
+
+    /// A member that is a directory entry contributes no bytes, so it must not be
+    /// counted against the budget — an archive of many nested directories is not a bomb.
+    #[test]
+    fn directory_entries_do_not_consume_the_byte_budget() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dirs.zip");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        for index in 0..6 {
+            zip.add_directory(format!("nested{index}/"), options)
+                .unwrap();
+        }
+        zip.start_file("a.txt", options).unwrap();
+        zip.write_all(b"small").unwrap();
+        zip.finish().unwrap();
+
+        let destination = tempfile::tempdir().unwrap();
+        let limits = ExtractLimits {
+            max_total_bytes: 16,
+            max_entry_bytes: 16,
+            max_entries: 32,
+        };
+        let extracted = extract_zip_with_limits(&path, destination.path(), limits)
+            .expect("directories cost no bytes");
+        assert_eq!(extracted, 1, "only the file counts as extracted");
+    }
+}

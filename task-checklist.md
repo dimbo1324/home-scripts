@@ -116,3 +116,81 @@ Reported so the next reader knows these were checked rather than skipped:
 - [+] Final report in Russian
 - [-] Not merged or pushed: no publish was requested for this branch. The gate is green,
       so the merge is available on request.
+
+---
+
+# Follow-on task, same branch: frontend polish and harder tests
+
+**Date:** 2026-09-05
+
+Owner instruction: modernise the frontend a little — cosmetic only, no redesign — and add
+more tests, especially for contentious and ambiguous cases. Merge and push once green.
+
+## 1 — Frontend
+
+The "no visual polish without a direct requirement" rule does not bite here: the
+requirement is direct. The design system was already mature (tokens, `focus-visible`,
+reduced motion, themed scrollbars, no CSS framework by owner decision), so this adds what
+was missing rather than repainting what was not.
+
+- [+] **A defect found by opening the app rather than reading it.** The palette was
+      defined only under `[data-theme=...]`, and that attribute is stamped by `initTheme`,
+      which runs *after* settings load. Until then — and forever when loading fails —
+      every colour token was undefined, so the startup-failure screen rendered in browser
+      defaults: near-black text on a near-black page, on the one screen that must be
+      readable. The light palette is now also the bare `:root` default. Verified in a
+      browser: the same screen now renders with the real palette.
+- [+] Native checkboxes, radios and the text caret follow `--accent` instead of the
+      engine's default blue (most visible in dark mode)
+- [+] Headings balance across two lines; prose avoids a one-word last line
+- [+] Standard `scrollbar-width`/`scrollbar-color` beside the WebKit rules, for the day
+      macOS and Linux return
+- [+] The main pane reserves the scrollbar's width, so filtering a list no longer shifts
+      the page sideways under the pointer, and no longer passes scroll to the shell
+- [+] Two labels that ellipsise now say what they are on hover
+- [-] The interface itself could not be viewed: without the Tauri bridge the app stops at
+      its startup screen. What was verified in the browser is the base layer and that
+      failure screen; the rest rests on typecheck, lint, Prettier and a clean build.
+
+## 2 — Tests for the contentious cases, and what they found
+
+30 new tests. Three of them failed when written, and all three were right to.
+
+- [+] **Redacting a placeholder was not idempotent.** Redaction runs in more than one
+      pass by design; the later pass treated an existing `<REDACTED:s1>` as a fresh secret
+      and issued `s2`. One credential therefore came out labelled `s1` in
+      `03_text_dump.txt` and `s2` in `06_security_scan.json` — matching a value across a
+      bundle is the *only* thing labels are for, so the feature was failing quietly.
+      Fixed in one place, by making the substitution idempotent; six unit tests pin the
+      invariant and a pipeline test pins the user-visible promise. The golden references
+      confirm the unlabelled default output did not move.
+- [+] **A finding in both `.codepack-allow` and a baseline** is reported as reviewed, not
+      as old. The allowlist runs first, so the stronger statement wins. Pinned, since the
+      order is a decision.
+- [+] **A fingerprint does not change when a credential is rotated in place.** It is
+      computed from the *redacted* message, because deriving it from the value would be a
+      checkable commitment to it (invariant I3, the same reason a hash was rejected for
+      labels). So an accepted entry survives a key rotation. Arguably right for an
+      accepted `.env`, but it is a real property with a security flavour and nobody had
+      written it down. **Worth an owner decision; recorded in the test rather than left
+      to be discovered.**
+- [+] Archive member names where the safe answer is not obvious: backslashes, degenerate
+      and empty names, Windows device names, deep nesting, non-ASCII, and directory
+      entries not consuming the byte budget
+- [+] Scanner input where it is not obvious: CRLF (line numbers and messages), a final
+      line without a newline, empty files, non-ASCII paths, a file that vanished between
+      planning and scanning, an oversized file keeping its filename verdict, and binary
+      content behind a text extension
+- [+] The boundary between the scanner and `verify`: an already-redacted line *is*
+      reported, because shape is all the scanner can judge — `verify` is the layer that
+      knows placeholders
+- [+] Storage: pruning to zero, an opaque stored value, an unusual key
+- [-] Two tests I wrote asserted my assumptions rather than the code, and the code was
+      right both times. Rewritten to pin the real behaviour with the reasoning attached.
+
+## Verification
+
+- [+] `cargo xtask gate` green — eight sections, exit 0, **1454 Rust tests** (1424 before),
+      78 `scripts/` tests, frontend 137 files / 0 errors, `AGENTS.md` in sync, network
+      isolation ok
+- [+] `pnpm --filter @codepack/ui build` clean

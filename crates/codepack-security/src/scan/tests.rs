@@ -935,3 +935,263 @@ fn result_from_findings_recounts_by_kind() {
     let empty = result_from_findings(Vec::new());
     assert_eq!(empty.summary, ScanSummary::default());
 }
+
+// --- Ambiguous input ------------------------------------------------------------------
+//
+// Cases where the right answer is not obvious from reading the scanner, so the decision
+// is pinned here rather than rediscovered by whoever changes it next.
+
+/// Windows files arrive with `\r\n`. If the carriage return survived into a finding's
+/// message it would reach `06_security_scan.json` as a stray control character, and if
+/// it broke the line split the line numbers would be off by everything.
+#[test]
+fn carriage_returns_change_neither_the_line_number_nor_the_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let unix = write_file(
+        dir.path(),
+        "unix.py",
+        "import os\nAPI_KEY = \"abcdef0123456789\"\n",
+    );
+    let windows = write_file(
+        dir.path(),
+        "windows.py",
+        "import os\r\nAPI_KEY = \"abcdef0123456789\"\r\n",
+    );
+
+    let result = scan_project(dir.path(), &[unix, windows], None, &no_cancel()).unwrap();
+    let on = |name: &str| {
+        result
+            .findings
+            .iter()
+            .find(|finding| finding.file.ends_with(name))
+            .unwrap_or_else(|| panic!("no finding for {name}: {:?}", result.findings))
+            .clone()
+    };
+
+    let unix_finding = on("unix.py");
+    let windows_finding = on("windows.py");
+    assert_eq!(unix_finding.line, Some(2));
+    assert_eq!(
+        windows_finding.line,
+        Some(2),
+        "the split must not count \\r as a line"
+    );
+    assert_eq!(
+        unix_finding.message, windows_finding.message,
+        "a carriage return must not reach the message"
+    );
+    assert!(!windows_finding.message.contains('\r'));
+}
+
+/// A file whose last line has no newline is the common case for generated content, and
+/// the last line is exactly where a credential appended by a script lands.
+#[test]
+fn a_final_line_without_a_newline_is_still_scanned() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_file(
+        dir.path(),
+        "app.py",
+        "print(1)\nAPI_KEY = \"abcdef0123456789\"",
+    );
+
+    let result = scan_project(dir.path(), &[file], None, &no_cancel()).unwrap();
+    assert!(
+        result
+            .findings
+            .iter()
+            .any(|finding| finding.line == Some(2)),
+        "{:?}",
+        result.findings
+    );
+}
+
+#[test]
+fn an_empty_file_is_answered_about_rather_than_skipped_or_crashed() {
+    let dir = tempfile::tempdir().unwrap();
+    let empty = write_file(dir.path(), "empty.py", "");
+    let blank = write_file(dir.path(), "blank.py", "\n\n\n");
+
+    let result = scan_project(dir.path(), &[empty, blank], None, &no_cancel()).unwrap();
+    assert_eq!(result.summary.total_findings, 0);
+}
+
+/// An already-redacted line is still reported, and that is the division of
+/// responsibility rather than a defect.
+///
+/// The scanner judges *shape*: `API_KEY=<REDACTED>` has a key, a separator and a value,
+/// and nothing about the value's bytes says it is this crate's own output rather than a
+/// password that happens to look like it. The layer that does know is `verify`, which
+/// strips `REDACTION_PLACEHOLDER_PREFIXES` before asking whether anything
+/// credential-shaped is left — which is why that constant is exported at all.
+///
+/// What the scanner *must* guarantee is that re-reading its own output does not invent a
+/// new secret: the placeholder comes back byte for byte, with no fresh label. Before the
+/// substitution was made idempotent it did not, and one credential ended up `s1` in the
+/// text dump and `s2` in the scan report.
+#[test]
+fn re_scanning_redacted_text_reproduces_the_placeholder_rather_than_relabelling_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_file(
+        dir.path(),
+        "already_redacted.txt",
+        "API_KEY=<REDACTED:s1>
+DATABASE_URL=<REDACTED_SECRET:s2>
+TOKEN=<REDACTED>
+",
+    );
+
+    let redactor = crate::Redactor::labelled();
+    let result = scan_with(
+        dir.path(),
+        &[file],
+        &ScanOptions {
+            redactor: Some(&redactor),
+            ..ScanOptions::default()
+        },
+    );
+
+    // Reported — the shape is a shape.
+    assert!(result.summary.potential_secrets > 0);
+    // But every placeholder survives unchanged, and none was issued a new number.
+    for finding in &result.findings {
+        for (original, wrong) in [
+            ("<REDACTED:s1>", "<REDACTED:s3>"),
+            ("<REDACTED_SECRET:s2>", "<REDACTED_SECRET:s3>"),
+        ] {
+            if finding
+                .message
+                .contains(original.split(':').next().unwrap())
+            {
+                assert!(
+                    !finding.message.contains(wrong),
+                    "a placeholder was relabelled: {}",
+                    finding.message
+                );
+            }
+        }
+    }
+    assert_eq!(
+        redactor.distinct_secrets(),
+        0,
+        "no placeholder should have been counted as a credential"
+    );
+}
+
+/// The product ships Russian-named artifacts, so a path that is not ASCII is ordinary
+/// input rather than an edge case, and it has to survive into the finding intact.
+#[test]
+fn a_non_ascii_path_is_reported_verbatim() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_file(
+        dir.path(),
+        "отчёты/секреты.py",
+        "API_KEY = \"abcdef0123456789\"\n",
+    );
+
+    let result = scan_project(dir.path(), &[file], None, &no_cancel()).unwrap();
+    let finding = result.findings.first().expect("the file is scanned");
+    assert!(
+        finding.file.contains("секреты.py"),
+        "the path was mangled: {}",
+        finding.file
+    );
+}
+
+/// One credential used in two places is the fact a reader most wants from labels: it
+/// says "this is one leak, not two". The label is per *value*, not per file.
+#[test]
+fn the_same_secret_in_two_files_carries_the_same_label() {
+    let dir = tempfile::tempdir().unwrap();
+    let line = "API_KEY = \"one-single-shared-value\"\n";
+    let first = write_file(dir.path(), "a.py", line);
+    let second = write_file(dir.path(), "b.py", line);
+
+    let redactor = crate::Redactor::labelled();
+    let result = scan_with(
+        dir.path(),
+        &[first, second],
+        &ScanOptions {
+            redactor: Some(&redactor),
+            ..ScanOptions::default()
+        },
+    );
+
+    let labels: Vec<String> = result
+        .findings
+        .iter()
+        .filter_map(|finding| {
+            let at = finding.message.find("<REDACTED:")?;
+            let rest = &finding.message[at..];
+            rest.split_once('>').map(|(label, _)| label.to_string())
+        })
+        .collect();
+    assert_eq!(
+        labels.len(),
+        2,
+        "both files should report: {:?}",
+        result.findings
+    );
+    assert_eq!(labels[0], labels[1], "one value, one label");
+    assert_eq!(redactor.distinct_secrets(), 1);
+}
+
+/// And the inverse, which is the half that would be wrong silently: two different values
+/// must not collapse into one label just because they sit under the same key name.
+#[test]
+fn two_different_secrets_under_the_same_key_name_get_different_labels() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = write_file(dir.path(), "a.py", "API_KEY = \"first-distinct-value-x\"\n");
+    let second = write_file(dir.path(), "b.py", "API_KEY = \"second-distinct-value\"\n");
+
+    let redactor = crate::Redactor::labelled();
+    scan_with(
+        dir.path(),
+        &[first, second],
+        &ScanOptions {
+            redactor: Some(&redactor),
+            ..ScanOptions::default()
+        },
+    );
+    assert_eq!(redactor.distinct_secrets(), 2);
+}
+
+/// A file the caller lists but that is not there is not an error: the plan is built
+/// before the scan, and a file can be deleted in between. Skipping it quietly is the
+/// decision — pinned, because "return an error" is the equally plausible alternative.
+#[test]
+fn a_file_that_vanished_between_planning_and_scanning_is_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let present = write_file(dir.path(), "here.py", "API_KEY = \"abcdef0123456789\"\n");
+    let missing = PathBuf::from("gone.py");
+
+    let result = scan_project(dir.path(), &[missing, present], None, &no_cancel()).unwrap();
+    assert_eq!(result.summary.total_findings, 1);
+}
+
+/// The size limit skips a file's *contents*; its name is still classified. A `.env` too
+/// large to read is still a `.env`, and reporting nothing about it would be the wrong
+/// silence.
+#[test]
+fn an_oversized_file_keeps_its_filename_verdict() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = write_file(dir.path(), ".env", &"A=1\n".repeat(2000));
+
+    let result = scan_project(dir.path(), &[env], Some(16), &no_cancel()).unwrap();
+    assert_eq!(result.summary.sensitive_files, 1);
+    assert_eq!(
+        result.summary.potential_secrets, 0,
+        "the contents were over the limit and must not have been read"
+    );
+}
+
+/// Binary content is classified by its bytes, not its extension: a `.py` holding NUL
+/// bytes is not text, and scanning it line by line would produce nonsense findings.
+#[test]
+fn a_text_extension_holding_binary_content_is_not_scanned_as_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fake.py");
+    std::fs::write(&path, [0u8, 1, 2, 0, 3, 4]).unwrap();
+
+    let result = scan_project(dir.path(), &[PathBuf::from("fake.py")], None, &no_cancel()).unwrap();
+    assert_eq!(result.summary.total_findings, 0);
+}

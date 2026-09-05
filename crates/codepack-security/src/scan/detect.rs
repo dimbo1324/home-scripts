@@ -189,6 +189,28 @@ pub(super) fn collect_secret_hits(line: &str, strict_checksums: bool) -> Vec<Sec
         .collect()
 }
 
+/// Where this crate's own redaction placeholders sit in `line`.
+///
+/// A placeholder runs from one of the known prefixes to the `>` that closes it. An
+/// unterminated one — text that merely begins like a placeholder — is not treated as
+/// one, so a line that genuinely contains `<REDACTED:` as content is still scanned.
+fn placeholder_spans(line: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    for prefix in crate::pseudonym::REDACTION_PLACEHOLDER_PREFIXES {
+        let mut from = 0usize;
+        while let Some(at) = line[from..].find(prefix) {
+            let start = from + at;
+            let end = match line[start..].find('>') {
+                Some(offset) => start + offset + 1,
+                None => break,
+            };
+            spans.push((start, end));
+            from = end;
+        }
+    }
+    spans
+}
+
 /// Invariant I3 (`.ai/project/12-domain-rules.md`): a `Finding.message` must never
 /// contain a raw secret value. [`keyword::redacted_line`] alone only redacts
 /// keyword-shaped `key=value`/`key: value` spans — a bare provider signature or
@@ -220,6 +242,22 @@ fn mask_non_keyword_secret_spans<'a>(
     for found in entropy::entropy_findings(line) {
         spans.push((found.start, found.end));
     }
+
+    // This pass runs over text the *first* pass has already redacted, so some of what it
+    // finds is this crate's own output. `<REDACTED:s1>` is a high-entropy-looking token,
+    // and masking it again asks the labeller for a number for the placeholder itself —
+    // which is how a credential ended up labelled `s1` in `03_text_dump.txt` and `s2` in
+    // `06_security_scan.json`, breaking the one thing labels exist for.
+    //
+    // With labels off both spellings are the same literal, so nothing about the default
+    // output changes; the bug was only visible once the placeholders carried numbers.
+    let placeholders = placeholder_spans(line);
+    spans.retain(|&(start, end)| {
+        !placeholders
+            .iter()
+            .any(|&(from, to)| start < to && from < end)
+    });
+
     if spans.is_empty() {
         return std::borrow::Cow::Borrowed(line);
     }

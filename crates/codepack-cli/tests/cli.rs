@@ -2023,3 +2023,180 @@ fn the_default_hook_is_still_the_permissive_one() {
     let hook = std::fs::read_to_string(payload["hook"].as_str().unwrap()).unwrap();
     assert!(hook.contains("NOT checked"));
 }
+
+/// A finding listed in *both* files is a case neither file's documentation answers.
+///
+/// The order settles it: the allowlist runs first, so the finding leaves the set before
+/// the baseline is consulted, and it is reported as reviewed rather than as merely old.
+/// That is the right way round — "somebody read this" is the stronger statement — but it
+/// is a decision, so it is pinned here.
+#[test]
+fn a_finding_in_both_files_is_reported_as_reviewed_not_as_old() {
+    let sandbox = Sandbox::new().with_secret();
+    let project = sandbox.project().display().to_string();
+
+    let listed = json(&sandbox.run(&["scan", &project, "--json"]));
+    let fingerprint = listed["findings"][0]["fingerprint"].as_str().unwrap();
+
+    // The same fingerprint in both files.
+    std::fs::write(
+        sandbox.project().join(".codepack-allow"),
+        format!("[[allow]]\nfingerprint = \"{fingerprint}\"\nreason = \"reviewed\"\n"),
+    )
+    .unwrap();
+    let baseline = sandbox.out().join("baseline.json").display().to_string();
+    std::fs::write(
+        &baseline,
+        format!(
+            r#"{{"schema_version":1,"generated_at":"now","project":"p","fingerprints":["{fingerprint}"]}}"#
+        ),
+    )
+    .unwrap();
+
+    let payload = json(&sandbox.run(&["scan", &project, "--baseline", &baseline, "--json"]));
+    let suppressed = payload["suppressed"].as_array().unwrap();
+    assert!(
+        suppressed
+            .iter()
+            .any(|entry| entry["fingerprint"] == fingerprint),
+        "the allowlist should claim it: {payload}"
+    );
+    assert!(
+        !payload["baselined"]
+            .as_array()
+            .is_some_and(|entries| entries
+                .iter()
+                .any(|entry| entry["fingerprint"] == fingerprint)),
+        "and the baseline should not claim it twice: {payload}"
+    );
+}
+
+/// Fingerprints are relative to the project, not absolute — which is the property that
+/// makes a committed `.codepack-allow` work at all.
+///
+/// The consequence is worth stating plainly, because it surprises: two checkouts with
+/// the same relative path and the same content produce the *same* fingerprint, so a
+/// baseline is portable between them. That is deliberate — a clone at a different path
+/// is the same repository — and it also means pointing `--baseline` at an unrelated
+/// project's file will silence findings there. The file is named explicitly on the
+/// command line, so that is a user's choice rather than a silent trap, but it is a real
+/// edge and this is where it is recorded.
+#[test]
+fn a_fingerprint_follows_the_relative_path_so_it_survives_a_clone() {
+    let original = Sandbox::new().with_secret();
+    let baseline = original.out().join("baseline.json").display().to_string();
+    original.run(&[
+        "scan",
+        &original.project().display().to_string(),
+        "--write-baseline",
+        &baseline,
+    ]);
+
+    // A second checkout: a different directory, the same relative layout and contents.
+    let clone = Sandbox::new().with_secret();
+    let payload = json(&clone.run(&[
+        "scan",
+        &clone.project().display().to_string(),
+        "--baseline",
+        &baseline,
+        "--json",
+    ]));
+    assert_eq!(
+        payload["summary"]["total_findings"], 0,
+        "a clone at another path is the same repository: {payload}"
+    );
+
+    // Rotating the value in place does *not* move the fingerprint, and that deserves
+    // stating rather than discovering. The fingerprint is computed from the **redacted**
+    // message, because a fingerprint derived from the value would be a checkable
+    // commitment to it — the same reason a hash was rejected for the labels (invariant
+    // I3). So it identifies "this rule, in this file, in this shape", not "this
+    // credential".
+    //
+    // The consequence: an entry a team accepted survives a key rotation. For an accepted
+    // `.env` that is arguably right — the acceptance was about the file, not the byte
+    // string — but it is a real property with a security flavour, and it is recorded here
+    // rather than left to be found by someone relying on the opposite.
+    std::fs::write(
+        clone.project().join(".env"),
+        concat!(
+            "API_KEY=",
+            "a-completely-different-value
+"
+        ),
+    )
+    .unwrap();
+    let after = json(&clone.run(&[
+        "scan",
+        &clone.project().display().to_string(),
+        "--baseline",
+        &baseline,
+        "--json",
+    ]));
+    assert_eq!(
+        after["summary"]["total_findings"], 0,
+        "the redacted shape is unchanged, so the fingerprint is too: {after}"
+    );
+
+    // What *does* move it is the shape: a different key name is a different finding.
+    std::fs::write(
+        clone.project().join(".env"),
+        concat!(
+            "OTHER_KEY=",
+            "totally-fake-value-0001
+"
+        ),
+    )
+    .unwrap();
+    let renamed = json(&clone.run(&[
+        "scan",
+        &clone.project().display().to_string(),
+        "--baseline",
+        &baseline,
+        "--json",
+    ]));
+    assert!(
+        renamed["summary"]["total_findings"].as_u64().unwrap() > 0,
+        "a different key name is a different finding: {renamed}"
+    );
+}
+
+/// Recording a baseline for a clean project writes an empty one, and reading it back is
+/// a no-op rather than an error — the state a team reaches once the list is worked down.
+#[test]
+fn an_empty_baseline_round_trips_and_suppresses_nothing() {
+    let sandbox = Sandbox::new();
+    let project = sandbox.project().display().to_string();
+    let baseline = sandbox.out().join("baseline.json").display().to_string();
+
+    assert_eq!(
+        code(&sandbox.run(&["scan", &project, "--write-baseline", &baseline])),
+        0
+    );
+    let output = sandbox.run(&["scan", &project, "--baseline", &baseline, "--json"]);
+    assert_eq!(code(&output), 0);
+    assert_eq!(json(&output)["summary"]["total_findings"], 0);
+}
+
+/// `--write-baseline` and `--baseline` naming the same file in one run: the baseline is
+/// written from what survives the allowlist and then immediately filters the report, so
+/// the run reports nothing new — which is the honest answer, and is what a team's first
+/// adoption run looks like.
+#[test]
+fn recording_and_reading_the_same_file_in_one_run_is_coherent() {
+    let sandbox = Sandbox::new().with_secret();
+    let project = sandbox.project().display().to_string();
+    let baseline = sandbox.out().join("baseline.json").display().to_string();
+
+    let output = sandbox.run(&[
+        "scan",
+        &project,
+        "--write-baseline",
+        &baseline,
+        "--baseline",
+        &baseline,
+        "--json",
+    ]);
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert_eq!(json(&output)["summary"]["total_findings"], 0);
+}

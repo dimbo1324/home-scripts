@@ -184,4 +184,40 @@ mod tests {
         conn.execute("DELETE FROM project", []).unwrap();
         assert_eq!(load_scan_cache(&conn).unwrap().len(), 1);
     }
+
+    /// `keep = 0` empties the cache. Pinned because "0 means no limit" is the equally
+    /// plausible reading, and the two differ by the whole table.
+    #[test]
+    fn pruning_to_zero_empties_the_cache() {
+        let (_dir, mut conn) = database();
+        store_scan_cache(&mut conn, &entries(&[("a", "[]"), ("b", "[]")]), &[]).unwrap();
+
+        assert_eq!(prune_scan_cache(&conn, 0).unwrap(), 2);
+        assert!(load_scan_cache(&conn).unwrap().is_empty());
+    }
+
+    /// A stored value is opaque to this layer: it is whatever `codepack-security` encoded,
+    /// and this crate must not parse, validate or normalise it. A round trip of something
+    /// that is not JSON at all proves the boundary holds.
+    #[test]
+    fn the_stored_value_is_opaque_to_the_storage_layer() {
+        let (_dir, mut conn) = database();
+        let odd = "not json at all — {\"unbalanced\": ";
+        store_scan_cache(&mut conn, &[("k".to_string(), odd.to_string())], &[]).unwrap();
+
+        let loaded = load_scan_cache(&conn).unwrap();
+        assert_eq!(loaded, vec![("k".to_string(), odd.to_string())]);
+    }
+
+    /// Keys are hex digests in practice, but nothing here depends on that. A key with
+    /// punctuation must round-trip rather than being mangled by the query.
+    #[test]
+    fn an_unusual_key_round_trips_unchanged() {
+        let (_dir, mut conn) = database();
+        let key = "a'b\"c%d_e--f";
+        store_scan_cache(&mut conn, &[(key.to_string(), "[]".to_string())], &[]).unwrap();
+
+        let loaded = load_scan_cache(&conn).unwrap();
+        assert_eq!(loaded, vec![(key.to_string(), "[]".to_string())]);
+    }
 }

@@ -85,6 +85,27 @@ fn normalise(secret: &str) -> String {
     unquoted.to_string()
 }
 
+/// The placeholder `secret` already is, if it is one.
+///
+/// **Redacting a placeholder yields that same placeholder.** Without this, a second
+/// redaction pass over already-redacted text treats `<REDACTED:s1>` as a fresh secret
+/// and hands it `s2` — which is how one credential came out labelled `s1` in
+/// `03_text_dump.txt` and `s2` in `06_security_scan.json`. Matching a value across a
+/// bundle is the only thing labels are for, so that was the feature failing quietly.
+///
+/// Two passes are by design, not an accident to remove: `redacted_line_with` redacts
+/// content and then collapses what is left of a keyword line, and the scan's message
+/// builder masks bare provider and entropy spans afterwards. Making the substitution
+/// idempotent fixes every one of them at once, including the next one somebody adds.
+fn existing_placeholder(secret: &str) -> Option<String> {
+    let candidate = normalise(secret);
+    let looks_like = REDACTION_PLACEHOLDER_PREFIXES
+        .iter()
+        .any(|prefix| candidate.starts_with(prefix))
+        && candidate.ends_with('>');
+    looks_like.then_some(candidate)
+}
+
 /// How a redaction site spells its replacement.
 ///
 /// Threaded through the redaction functions rather than read from a global: two exports
@@ -109,6 +130,9 @@ impl<'a> Placeholders<'a> {
 
     /// Replacement for a value that follows a key (`API_KEY=<here>`).
     pub fn value(&self, secret: &str) -> String {
+        if let Some(existing) = existing_placeholder(secret) {
+            return existing;
+        }
         match self.labels {
             Some(labels) => format!("<REDACTED:s{}>", labels.label(secret)),
             None => "<REDACTED>".to_string(),
@@ -118,6 +142,9 @@ impl<'a> Placeholders<'a> {
     /// Replacement for a span with no key of its own — a bare token, a provider
     /// signature, a password inside a URL.
     pub fn bare(&self, secret: &str) -> String {
+        if let Some(existing) = existing_placeholder(secret) {
+            return existing;
+        }
         match self.labels {
             Some(labels) => format!("<REDACTED_SECRET:s{}>", labels.label(secret)),
             None => "<REDACTED_SECRET>".to_string(),
@@ -204,5 +231,103 @@ mod tests {
         let second = Labels::default();
         assert_eq!(Placeholders::labelled(&first).value("a"), "<REDACTED:s1>");
         assert_eq!(Placeholders::labelled(&second).value("b"), "<REDACTED:s1>");
+    }
+
+    // --- Redacting a placeholder yields that same placeholder -------------------------
+    //
+    // Two redaction passes over one line are by design, so the substitution has to be
+    // idempotent. It was not, and the failure was silent: the second pass treated
+    // `<REDACTED:s1>` as a fresh secret and issued `s2`, so one credential came out
+    // labelled differently in `03_text_dump.txt` and `06_security_scan.json` — which is
+    // the only thing labels exist to prevent.
+
+    #[test]
+    fn a_labelled_placeholder_survives_a_second_pass_unchanged() {
+        let labels = Labels::default();
+        let placeholders = Placeholders::labelled(&labels);
+
+        let first = placeholders.value("hunter2hunter2");
+        assert_eq!(first, "<REDACTED:s1>");
+        assert_eq!(
+            placeholders.value(&first),
+            first,
+            "a second pass must not relabel"
+        );
+        assert_eq!(
+            labels.distinct(),
+            1,
+            "the placeholder is not a second credential"
+        );
+    }
+
+    #[test]
+    fn the_bare_form_is_idempotent_too() {
+        let labels = Labels::default();
+        let placeholders = Placeholders::labelled(&labels);
+
+        let first = placeholders.bare("AKIAIOSFODNN7EXAMPLE");
+        assert_eq!(first, "<REDACTED_SECRET:s1>");
+        assert_eq!(placeholders.bare(&first), first);
+        assert_eq!(labels.distinct(), 1);
+    }
+
+    /// A placeholder produced by one form must not be renamed by the other. This is the
+    /// exact crossing that broke: content redaction writes `<REDACTED:sN>` and the scan
+    /// message builder then masks bare spans.
+    #[test]
+    fn the_two_forms_do_not_rename_each_other_s_placeholders() {
+        let labels = Labels::default();
+        let placeholders = Placeholders::labelled(&labels);
+
+        let value_form = placeholders.value("first-credential");
+        let bare_form = placeholders.bare("second-credential");
+
+        assert_eq!(placeholders.bare(&value_form), value_form);
+        assert_eq!(placeholders.value(&bare_form), bare_form);
+        assert_eq!(labels.distinct(), 2, "still exactly two real credentials");
+    }
+
+    /// Quoting is syntax, so a placeholder wrapped in quotes is still a placeholder —
+    /// the same rule `normalise` already applies to values.
+    #[test]
+    fn a_quoted_placeholder_is_recognised() {
+        let labels = Labels::default();
+        let placeholders = Placeholders::labelled(&labels);
+
+        assert_eq!(placeholders.value("\"<REDACTED:s4>\""), "<REDACTED:s4>");
+        assert_eq!(placeholders.value(" <REDACTED:s4> "), "<REDACTED:s4>");
+        assert_eq!(labels.distinct(), 0);
+    }
+
+    /// Text that merely *starts* like a placeholder is not one, or a line of real prose
+    /// discussing redaction would stop being scanned.
+    #[test]
+    fn an_unterminated_placeholder_is_not_treated_as_one() {
+        let labels = Labels::default();
+        let placeholders = Placeholders::labelled(&labels);
+
+        let answer = placeholders.value("<REDACTED:s1 and then some actual secret");
+        assert_eq!(
+            answer, "<REDACTED:s1>",
+            "it is redacted as a value, not passed through"
+        );
+        assert_eq!(labels.distinct(), 1);
+    }
+
+    /// Plain mode has always produced one indistinguishable placeholder, and still does.
+    /// The idempotence rule must not change what an unlabelled run writes — the golden
+    /// references are the proof, and this is the unit-level statement of the same thing.
+    #[test]
+    fn plain_mode_is_unchanged_by_the_idempotence_rule() {
+        let placeholders = Placeholders::plain();
+
+        assert_eq!(placeholders.value("hunter2"), "<REDACTED>");
+        assert_eq!(
+            placeholders.bare("AKIAIOSFODNN7EXAMPLE"),
+            "<REDACTED_SECRET>"
+        );
+        // And re-reading its own output keeps the spelling it already had.
+        assert_eq!(placeholders.value("<REDACTED>"), "<REDACTED>");
+        assert_eq!(placeholders.bare("<REDACTED_SECRET>"), "<REDACTED_SECRET>");
     }
 }

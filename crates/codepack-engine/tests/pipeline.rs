@@ -658,3 +658,109 @@ fn labels_off_leaves_the_scan_report_unlabelled() {
     assert!(!report.contains("<REDACTED_SECRET:s"));
     assert!(!report.contains("hunter2hunter2"));
 }
+
+/// The promise labels exist to keep: one credential carries one label across every
+/// artifact in the bundle.
+///
+/// This is the regression test for a defect the scanner's own tests exposed. Redaction
+/// runs in more than one pass, and the later pass used to treat an existing
+/// `<REDACTED:s1>` as a fresh secret and issue `s2` — so `03_text_dump.txt` and
+/// `06_security_scan.json` disagreed about the same value, which is exactly the question
+/// a reader uses the labels to answer.
+#[test]
+fn one_credential_carries_one_label_across_the_whole_bundle() {
+    fn labels_in(text: &str) -> std::collections::BTreeSet<String> {
+        let mut found = std::collections::BTreeSet::new();
+        for prefix in ["<REDACTED:", "<REDACTED_SECRET:"] {
+            let mut from = 0usize;
+            while let Some(at) = text[from..].find(prefix) {
+                let start = from + at;
+                let Some(offset) = text[start..].find('>') else {
+                    break;
+                };
+                let label = &text[start..start + offset + 1];
+                // The dump's header explains the notation with a literal `<REDACTED:sN>`;
+                // that is a legend, not a label, so only `s` followed by digits counts.
+                let number = label.rsplit(':').next().unwrap_or("").trim_end_matches('>');
+                if let Some(digits) = number.strip_prefix('s')
+                    && !digits.is_empty()
+                    && digits.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    found.insert(label.to_string());
+                }
+                from = start + offset + 1;
+            }
+        }
+        found
+    }
+
+    let source = tempfile::tempdir().unwrap();
+    // The same credential in two files: one leak, and the bundle has to say so.
+    let secret = "postgres://user:hunter2hunter2@db.internal/app";
+    fs::write(
+        source.path().join("settings.py"),
+        format!("DATABASE_URL = \"{secret}\"\n"),
+    )
+    .unwrap();
+    fs::write(
+        source.path().join("worker.py"),
+        format!("DATABASE_URL = \"{secret}\"\n"),
+    )
+    .unwrap();
+    init_git_repo(source.path());
+
+    let output = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let mut conn = codepack_storage::open(&db_dir.path().join("codepack.db")).unwrap();
+    let config = Config {
+        redaction_labels: true,
+        keep_staging_folder: true,
+        ..Config::default()
+    };
+    let cancel = CancellationToken::new();
+    let (tx, _rx) = codepack_core::progress_channel();
+
+    let outcome = run_export(
+        &mut conn,
+        source.path(),
+        output.path(),
+        &config,
+        &HashMap::new(),
+        &tx,
+        &cancel,
+    )
+    .unwrap();
+    drop(tx);
+
+    let dump = fs::read_to_string(&outcome.paths.text_dump)
+        .expect("the text dump is part of every bundle");
+    let scan = fs::read_to_string(outcome.paths.insights_dir.join("06_security_scan.json"))
+        .expect("the scan report is part of every bundle");
+
+    // Neither artifact may carry the value itself (invariant I3).
+    assert!(!dump.contains("hunter2hunter2"));
+    assert!(!scan.contains("hunter2hunter2"));
+
+    let in_dump = labels_in(&dump);
+    let in_scan = labels_in(&scan);
+    assert!(
+        !in_dump.is_empty(),
+        "the dump should carry labels: {dump:.400}"
+    );
+    assert!(!in_scan.is_empty(), "the report should carry labels");
+
+    // One credential, so one number — and the same number on both sides.
+    assert_eq!(
+        in_dump.len(),
+        1,
+        "two files, one credential, so one label: {in_dump:?}"
+    );
+    let dump_number: Vec<&str> = in_dump.iter().map(|label| label.as_str()).collect();
+    let scan_number: Vec<&str> = in_scan.iter().map(|label| label.as_str()).collect();
+    let suffix = |label: &str| label.rsplit(':').next().unwrap_or(label).to_string();
+    assert_eq!(
+        suffix(dump_number[0]),
+        suffix(scan_number[0]),
+        "the same credential is labelled differently in two artifacts: {in_dump:?} vs {in_scan:?}"
+    );
+}
