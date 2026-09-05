@@ -764,3 +764,97 @@ fn one_credential_carries_one_label_across_the_whole_bundle() {
         "the same credential is labelled differently in two artifacts: {in_dump:?} vs {in_scan:?}"
     );
 }
+
+/// No artifact in the bundle may carry a credential embedded in a `package.json` script.
+///
+/// Written as a sweep over *every* file rather than as three assertions about three
+/// reports, because the defect it guards was precisely that: four reports extracted the
+/// same thing, one redacted it and three did not. A per-report test would have passed on
+/// the one that was right and never been written for the fifth report nobody has added
+/// yet. This one covers reports that do not exist.
+#[test]
+fn no_bundle_artifact_carries_a_credential_from_a_package_json_script() {
+    fn walk(dir: &Path, found: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, found);
+            } else {
+                found.push(path);
+            }
+        }
+    }
+
+    const CREDENTIAL: &str = "npm_realvalue0123456789abcdef";
+
+    let source = tempfile::tempdir().unwrap();
+    fs::write(
+        source.path().join("package.json"),
+        format!(
+            r#"{{"name":"demo","scripts":{{"deploy":"NPM_TOKEN={CREDENTIAL} npm publish","build":"vite build"}}}}"#
+        ),
+    )
+    .unwrap();
+    fs::write(source.path().join("main.js"), "console.log(1);\n").unwrap();
+    init_git_repo(source.path());
+
+    let output = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+    let mut conn = codepack_storage::open(&db_dir.path().join("codepack.db")).unwrap();
+    let config = Config {
+        // Kept so the whole bundle can be swept before it is cleaned up.
+        keep_staging_folder: true,
+        ..Config::default()
+    };
+    let cancel = CancellationToken::new();
+    let (tx, _rx) = codepack_core::progress_channel();
+
+    let outcome = run_export(
+        &mut conn,
+        source.path(),
+        output.path(),
+        &config,
+        &HashMap::new(),
+        &tx,
+        &cancel,
+    )
+    .unwrap();
+    drop(tx);
+
+    let mut files = Vec::new();
+    walk(&outcome.paths.staging_dir, &mut files);
+    assert!(files.len() > 10, "the sweep should see a real bundle");
+
+    let mut leaked: Vec<String> = Vec::new();
+    for file in &files {
+        // The copied `package.json` itself is the source file, not an artifact: copied
+        // sources are included verbatim and safe mode governs which ones (see the
+        // README's own wording after this audit). Everything codepack *writes* is in
+        // scope here.
+        if file.file_name().is_some_and(|name| name == "package.json") {
+            continue;
+        }
+        if let Ok(text) = fs::read_to_string(file)
+            && text.contains(CREDENTIAL)
+        {
+            leaked.push(file.display().to_string());
+        }
+    }
+
+    assert!(
+        leaked.is_empty(),
+        "a package.json script credential reached {} artifact(s): {leaked:#?}",
+        leaked.len()
+    );
+
+    // And the sweep is only meaningful if the scripts actually made it into the reports.
+    let runbook = fs::read_to_string(outcome.paths.insights_dir.join("13_runbook.md"))
+        .expect("the runbook is part of the catalogue");
+    assert!(
+        runbook.contains("deploy"),
+        "the script should still be listed"
+    );
+}

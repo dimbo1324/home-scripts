@@ -106,7 +106,7 @@ pub use policy::{
     should_skip_file_for_safety,
 };
 pub use pseudonym::REDACTION_PLACEHOLDER_PREFIXES;
-pub use redact::redact_secrets;
+pub use redact::{redact_secrets, redact_shell_command};
 pub use scan::{
     Finding, FindingKind, ScanOptions, ScanResult, ScanSummary, result_from_findings, scan_project,
     scan_project_with_options,

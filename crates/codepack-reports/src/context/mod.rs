@@ -10,9 +10,11 @@
 //! redesign (churn the task explicitly asked to avoid).
 
 mod inventory;
+mod package_scripts;
 mod stack;
 
 pub use inventory::{ExtensionStat, Inventory, InventoryFile, LanguageStat, any_file_name};
+pub use package_scripts::{PackageScript, RedactedCommand, package_scripts};
 pub use stack::{DetectedStack, detect_package_managers, detect_stack};
 
 use std::path::{Path, PathBuf};

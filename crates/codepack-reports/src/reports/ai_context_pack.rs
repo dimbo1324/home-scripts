@@ -12,12 +12,11 @@ use std::path::Path;
 
 use codepack_tokens::format_bytes;
 
-use crate::context::ReportContext;
+use crate::context::{ReportContext, package_scripts};
 use crate::error::ReportError;
 use crate::plugin::ReportJob;
 use crate::profile;
 use crate::reports::config::find_config_files;
-use crate::text::safe_read_json;
 
 pub const JOB: ReportJob = ReportJob {
     filename: "12_ai_context_pack.md",
@@ -30,7 +29,6 @@ fn write_ai_context_pack(ctx: &ReportContext<'_>, output_file: &Path) -> Result<
     let inventory = ctx.inventory;
     let stack = crate::context::detect_stack(&ctx.staging_root, inventory);
     let configs = find_config_files(ctx);
-    let package_json = safe_read_json(&ctx.staging_root.join("package.json"));
     let project_name = ctx
         .staging_root
         .file_name()
@@ -89,21 +87,21 @@ project when quick project understanding is needed.\n\n",
     }
 
     out.push_str("\n## Scripts / commands\n\n");
-    match package_json.get("scripts").and_then(|v| v.as_object()) {
-        Some(scripts) if !scripts.is_empty() => {
-            let manager = if ctx.staging_root.join("pnpm-lock.yaml").exists() {
-                "pnpm"
-            } else {
-                "npm"
-            };
-            let mut names: Vec<&String> = scripts.keys().collect();
-            names.sort_by_key(|name| name.to_lowercase());
-            for name in names {
-                let command = scripts[name].as_str().unwrap_or_default();
-                out.push_str(&format!("- `{manager} run {name}` — `{command}`\n"));
-            }
+    // `pnpm` when the lockfile says so, `npm` otherwise — the same rule the other
+    // reports use to name the command a reader would actually type.
+    let manager = if crate::context::root_entry_exists(&ctx.staging_root, "pnpm-lock.yaml") {
+        "pnpm"
+    } else {
+        "npm"
+    };
+    let redacted_scripts = package_scripts(ctx);
+    if redacted_scripts.is_empty() {
+        out.push_str("- No package.json scripts detected.\n");
+    } else {
+        for script in &redacted_scripts {
+            let (name, command) = (&script.name, &script.command);
+            out.push_str(&format!("- `{manager} run {name}` — `{command}`\n"));
         }
-        _ => out.push_str("- No package.json scripts detected.\n"),
     }
 
     out.push_str("\n## Important configuration files\n\n");

@@ -17,13 +17,13 @@ use std::path::Path;
 
 use regex::Regex;
 
-use crate::context::{ReportContext, redact_line, root_entry_exists};
+use crate::context::{ReportContext, package_scripts, redact_line, root_entry_exists};
 use crate::error::ReportError;
 use crate::paths::path_depth;
 use crate::plugin::ReportJob;
 use crate::profile;
 use crate::reports::layout::section_rule;
-use crate::text::{read_text_lossy, safe_read_json};
+use crate::text::read_text_lossy;
 
 pub const JOB: ReportJob = ReportJob {
     filename: "04_scripts.txt",
@@ -60,8 +60,6 @@ fn is_root_dockerfile(relative_path: &str) -> bool {
 }
 
 fn write_scripts_report(ctx: &ReportContext<'_>, output_file: &Path) -> Result<(), ReportError> {
-    let package_json_value = safe_read_json(&ctx.staging_root.join("package.json"));
-
     let mut out = String::new();
     out.push_str("=== Scripts and Common Commands Report ===\n");
     out.push_str(&format!("Generated: {}\n", ctx.plan.generated_at));
@@ -69,26 +67,22 @@ fn write_scripts_report(ctx: &ReportContext<'_>, output_file: &Path) -> Result<(
     out.push_str("\n\n");
 
     out.push_str("--- package.json scripts ---\n");
-    let scripts = package_json_value
-        .get("scripts")
-        .and_then(|v| v.as_object());
-    match scripts {
-        Some(scripts) if !scripts.is_empty() => {
-            let manager = if root_entry_exists(&ctx.staging_root, "pnpm-lock.yaml") {
-                "pnpm"
-            } else {
-                "npm"
-            };
-            let mut names: Vec<&String> = scripts.keys().collect();
-            names.sort_by_key(|name| name.to_lowercase());
-            for name in names {
-                let command = scripts[name].as_str().unwrap_or_default();
-                out.push_str(&redact_line(&format!(
-                    "{manager} run {name:<24} # {command}\n"
-                )));
-            }
+    // Through the shared extractor like every other report. The `redact_line` call that
+    // used to sit here is gone: the command arrives redacted, and there is no longer a
+    // raw one to forget.
+    let redacted_scripts = package_scripts(ctx);
+    if redacted_scripts.is_empty() {
+        out.push_str("No package.json scripts detected.\n");
+    } else {
+        let manager = if root_entry_exists(&ctx.staging_root, "pnpm-lock.yaml") {
+            "pnpm"
+        } else {
+            "npm"
+        };
+        for script in &redacted_scripts {
+            let (name, command) = (&script.name, &script.command);
+            out.push_str(&format!("{manager} run {name:<24} # {command}\n"));
         }
-        _ => out.push_str("No package.json scripts detected.\n"),
     }
 
     out.push_str("\n--- Makefile targets ---\n");

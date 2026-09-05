@@ -57,7 +57,9 @@
 //! (decision 2026-07-25).
 
 use crate::patterns::keyword::{KeySpacing, redact_value_after_separator};
-use crate::patterns::keyword_scan::{find_bearer_tokens, find_keyword_assignments, scan_roots};
+use crate::patterns::keyword_scan::{
+    contains_root, find_bearer_tokens, find_keyword_assignments, scan_roots, skip_spaces,
+};
 use crate::patterns::{credentials, prefilter, provider};
 use crate::pseudonym::Placeholders;
 
@@ -80,6 +82,7 @@ use crate::pseudonym::Placeholders;
 /// never asked to police (arbitrary text, other people's source).
 fn find_redaction_spans(line: &str) -> Vec<(usize, usize)> {
     let mut spans = find_keyword_assignments(line, &scan_roots());
+    spans.extend(find_compound_keyword_assignments(line));
     spans.extend(find_bearer_tokens(line));
     spans.extend(credentials::find_http_auth_tokens(line));
     spans.extend(credentials::find_url_credentials(line));
@@ -100,6 +103,85 @@ fn find_redaction_spans(line: &str) -> Vec<(usize, usize)> {
             .into_iter()
             .map(|found| (found.start, found.end)),
     );
+    spans
+}
+
+/// Assignments whose key *carries* a keyword root in one of its `_`/`-` segments, rather
+/// than being one.
+///
+/// ## Why redaction is allowed to be wider than detection here
+///
+/// The shared matcher requires a root to stand as a whole word: `TOKEN=x` matches,
+/// `NPM_TOKEN=x` does not. That boundary reproduces legacy's `\b(…)\b` exactly and is
+/// deliberate — widening the *detector* would change what the scanner reports and move
+/// the golden references, which is an owner's decision rather than a repair.
+///
+/// Redaction is the other half of the asymmetry this crate already states: over-masking
+/// costs a masked word, under-masking leaks a credential. A sweep across a produced
+/// bundle found `NPM_TOKEN=…` surviving into `03_text_dump.txt` — the artifact most
+/// likely to be handed to somebody else — because of that boundary. So this pass runs
+/// **only** for redaction: `find_redaction_spans` calls it, and nothing in the detection
+/// path does.
+///
+/// Segment-wise rather than substring, so `TOKENIZER=…` is left alone while
+/// `NPM_TOKEN=…` and `AWS_SECRET_ACCESS_KEY=…` are masked.
+fn find_compound_keyword_assignments(line: &str) -> Vec<(usize, usize)> {
+    let roots = scan_roots();
+    let bytes = line.as_bytes();
+    let mut spans = Vec::new();
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if !(byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-') {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < bytes.len()
+            && (bytes[index].is_ascii_alphanumeric()
+                || bytes[index] == b'_'
+                || bytes[index] == b'-')
+        {
+            index += 1;
+        }
+        let name = &line[start..index];
+
+        // A bare root is the shared matcher's job; this pass exists for the compounded
+        // names it declines, so anything it already covers is skipped.
+        let compounded = name.contains(['_', '-']);
+        if !compounded
+            || !name
+                .split(['_', '-'])
+                .any(|segment| !segment.is_empty() && contains_root(segment, &roots))
+        {
+            continue;
+        }
+
+        // The operator must follow the name immediately. `NAME = value`, with spacing,
+        // is already collapsed by the line-level pass in `keyword::redacted_line_with`,
+        // and matching it here would only change that pass's spacing. What leaks is the
+        // tight `NAME=value` shell-assignment shape, and that is what this covers.
+        if index >= bytes.len() || (bytes[index] != b'=' && bytes[index] != b':') {
+            continue;
+        }
+        let value_start = skip_spaces(bytes, index + 1);
+        if value_start >= bytes.len() {
+            continue;
+        }
+        // The value runs to the next whitespace: an environment assignment in a command,
+        // a line in a `.env`, a YAML scalar. Quotes are part of it and are handled by the
+        // shared `replace_match`.
+        let mut value_end = value_start;
+        while value_end < bytes.len() && !bytes[value_end].is_ascii_whitespace() {
+            value_end += 1;
+        }
+        if value_end > value_start {
+            spans.push((start, value_end));
+            index = value_end;
+        }
+    }
+
     spans
 }
 
@@ -186,6 +268,88 @@ fn redact_line_spans(line: &str, placeholders: Placeholders<'_>) -> String {
     }
     out.push_str(&line[cursor..]);
     out
+}
+
+/// Redaction for a shell command line, which is stronger than [`redact_secrets`] in one
+/// specific way.
+///
+/// ## Why a command needs more than the general rule
+///
+/// The keyword matcher requires a root to stand as a whole word: `TOKEN=x` matches,
+/// `NPM_TOKEN=x` does not. That boundary is deliberate and documented — it reproduces
+/// legacy's `\b(…)\b` exactly, and widening it would change what the *scanner* reports,
+/// move the golden references, and is an owner's decision rather than a repair.
+///
+/// A shell command is the one place where that boundary is clearly wrong, because the
+/// shape is unambiguous: a command may be prefixed by environment assignments, and those
+/// names are conventionally compounded — `NPM_TOKEN=…`, `GH_TOKEN=…`,
+/// `AWS_SECRET_ACCESS_KEY=…`. `package.json`'s `scripts` are full of exactly this, they
+/// are never excluded by safe mode, and they are copied into the artifact meant to be
+/// pasted into a language model.
+///
+/// So this masks the value of a *leading* assignment whose name carries a keyword root in
+/// any `_`/`-` separated segment, and then applies the ordinary redaction to the rest. It
+/// is narrower than the general rule rather than a second copy of it: it only looks at
+/// assignments at the head of a command, where a bare word followed by `=` cannot be
+/// anything else.
+pub fn redact_shell_command(command: &str) -> String {
+    let mut out = String::with_capacity(command.len());
+    let mut rest = command;
+
+    // Leading `NAME=VALUE` runs, in order, stopping at the first token that is not one.
+    loop {
+        let leading_spaces = rest.len() - rest.trim_start().len();
+        let trimmed = rest.trim_start();
+        let Some((name, after)) = split_leading_assignment(trimmed) else {
+            break;
+        };
+        let (value, tail) = match after.find(char::is_whitespace) {
+            Some(at) => (&after[..at], &after[at..]),
+            None => (after, ""),
+        };
+        out.push_str(&rest[..leading_spaces]);
+        out.push_str(name);
+        out.push('=');
+        if name_carries_keyword_root(name) {
+            out.push_str("<REDACTED>");
+        } else {
+            out.push_str(value);
+        }
+        rest = tail;
+    }
+
+    out.push_str(&redact_secrets(rest));
+    out
+}
+
+/// Splits `NAME=` off the front of a command, if that is what it starts with.
+///
+/// A name is a shell-legal variable name: letters, digits and underscore, not starting
+/// with a digit. Anything else — a path, a flag, a quoted string — is not an assignment
+/// and stops the scan.
+fn split_leading_assignment(text: &str) -> Option<(&str, &str)> {
+    let at = text.find('=')?;
+    let name = &text[..at];
+    if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return None;
+    }
+    Some((name, &text[at + 1..]))
+}
+
+/// True when any `_`/`-` separated segment of `name` is one of the scan keyword roots.
+///
+/// Segment-wise rather than substring: `TOKENIZER` must not match, while `NPM_TOKEN` and
+/// `AWS_SECRET_ACCESS_KEY` must.
+fn name_carries_keyword_root(name: &str) -> bool {
+    let roots = scan_roots();
+    name.split(['_', '-'])
+        .any(|segment| !segment.is_empty() && contains_root(segment, &roots))
 }
 
 #[cfg(test)]

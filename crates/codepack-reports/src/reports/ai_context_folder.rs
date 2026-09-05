@@ -13,14 +13,13 @@ use std::path::Path;
 
 use codepack_tokens::format_bytes;
 
-use crate::context::ReportContext;
+use crate::context::{ReportContext, package_scripts};
 use crate::error::ReportError;
 use crate::plugin::ReportJob;
 use crate::profile;
 use crate::project_profile::build_project_profile;
 use crate::reports::ai_prompts::build_custom_prompt;
 use crate::reports::config::find_config_files;
-use crate::text::safe_read_json;
 
 pub const JOB: ReportJob = ReportJob {
     filename: "AI_CONTEXT",
@@ -42,8 +41,7 @@ fn write_ai_context_folder(ctx: &ReportContext<'_>, output_dir: &Path) -> Result
 
     let profile = build_project_profile(ctx);
     let configs = find_config_files(ctx);
-    let package_json = safe_read_json(&ctx.staging_root.join("package.json"));
-    let scripts = package_json.get("scripts").and_then(|v| v.as_object());
+    let redacted_scripts = package_scripts(ctx);
 
     let mut sizes: Vec<&crate::context::InventoryFile> = ctx.inventory.files.iter().collect();
     sizes.sort_by_key(|file| std::cmp::Reverse(file.size));
@@ -171,16 +169,13 @@ keys, and Git history.\n",
     )?;
 
     let mut scripts_out = String::from("# Scripts\n\n");
-    match scripts {
-        Some(scripts) if !scripts.is_empty() => {
-            let mut names: Vec<&String> = scripts.keys().collect();
-            names.sort_by_key(|name| name.to_lowercase());
-            for name in names {
-                let command = scripts[name].as_str().unwrap_or_default();
-                scripts_out.push_str(&format!("- `{name}` → `{command}`\n"));
-            }
+    if redacted_scripts.is_empty() {
+        scripts_out.push_str("- No package.json scripts detected.\n");
+    } else {
+        for script in &redacted_scripts {
+            let (name, command) = (&script.name, &script.command);
+            scripts_out.push_str(&format!("- `{name}` → `{command}`\n"));
         }
-        _ => scripts_out.push_str("- No package.json scripts detected.\n"),
     }
     write_file(output_dir, "10_SCRIPTS.md", &scripts_out)?;
 

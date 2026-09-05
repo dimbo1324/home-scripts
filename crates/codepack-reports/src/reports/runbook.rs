@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use crate::context::{ReportContext, root_entry_exists};
+use crate::context::{ReportContext, package_scripts, root_entry_exists};
 use crate::error::ReportError;
 use crate::paths::file_name_of;
 use crate::plugin::ReportJob;
@@ -63,7 +63,7 @@ fn env_examples<'a>(ctx: &ReportContext<'a>) -> Vec<&'a str> {
 
 fn write_runbook_report(ctx: &ReportContext<'_>, output_file: &Path) -> Result<(), ReportError> {
     let package_json = safe_read_json(&ctx.staging_root.join("package.json"));
-    let scripts = package_json.get("scripts").and_then(|v| v.as_object());
+    let redacted_scripts = package_scripts(ctx);
     let managers = crate::context::detect_package_managers(ctx.inventory);
     let manager = node_manager(ctx);
     let composes = compose_files(ctx);
@@ -119,25 +119,21 @@ before using them in production.\n\n",
     }
 
     out.push_str("## Development / run commands\n\n");
-    match scripts {
-        Some(scripts) if !scripts.is_empty() => {
-            let mut names: Vec<&String> = scripts.keys().collect();
-            names.sort_by_key(|name| name.to_lowercase());
-            for name in names {
-                let command = scripts[name].as_str().unwrap_or_default();
-                out.push_str(&format!("- `{manager} run {name}` → `{command}`\n"));
-            }
+    if !redacted_scripts.is_empty() {
+        for script in &redacted_scripts {
+            let (name, command) = (&script.name, &script.command);
+            out.push_str(&format!("- `{manager} run {name}` → `{command}`\n"));
         }
-        _ if root_entry_exists(&ctx.staging_root, "main.py") => {
-            out.push_str("```powershell\npython main.py\n```\n");
-        }
-        _ => out.push_str("No obvious development command detected.\n"),
+    } else if root_entry_exists(&ctx.staging_root, "main.py") {
+        out.push_str("```powershell\npython main.py\n```\n");
+    } else {
+        out.push_str("No obvious development command detected.\n");
     }
 
     out.push_str("\n## Test / check commands\n\n");
     let mut test_commands: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    if let Some(scripts) = scripts {
-        for name in scripts.keys() {
+    {
+        for name in redacted_scripts.iter().map(|script| &script.name) {
             let lower = name.to_lowercase();
             if lower.contains("test")
                 || lower.contains("check")

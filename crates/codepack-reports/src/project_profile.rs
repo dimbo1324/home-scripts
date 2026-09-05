@@ -340,18 +340,14 @@ pub fn build_project_profile(ctx: &ReportContext<'_>) -> ProjectProfile {
         .map(|path| file_name_of(path).to_string())
         .collect();
 
-    let npm_scripts: BTreeMap<String, String> = package_json
-        .get("scripts")
-        .and_then(|v| v.as_object())
-        .map(|object| {
-            object
-                .iter()
-                .filter_map(|(key, value)| {
-                    value.as_str().map(|value| (key.clone(), value.to_string()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    // Through the shared extractor: `PROJECT_PROFILE.json` is an artifact like any
+    // other, and a bundle-wide sweep found an inline credential from a script reaching
+    // it. The extractor hands back commands that are already redacted, so there is no
+    // raw one to forget here either.
+    let npm_scripts: BTreeMap<String, String> = crate::context::package_scripts(ctx)
+        .into_iter()
+        .map(|script| (script.name, script.command.as_str().to_string()))
+        .collect();
 
     let project_name = ctx
         .staging_root
