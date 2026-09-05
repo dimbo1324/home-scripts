@@ -686,6 +686,9 @@ mod tests {
 
     #[test]
     fn resources_are_listed_and_read_over_the_protocol() {
+        // The registry is process-wide; without this the resources tests replace it
+        // while this one is mid-session.
+        let _lock = resources::test_guard();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("manifest.json"), "{\"listed\":true}").unwrap();
         super::resources::register_bundle(dir.path(), None);
@@ -710,6 +713,7 @@ mod tests {
 
     #[test]
     fn reading_a_resource_that_is_not_registered_is_a_protocol_error() {
+        let _lock = resources::test_guard();
         let responses = drive(
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":\"file:///etc/passwd\"}}\n",
         );

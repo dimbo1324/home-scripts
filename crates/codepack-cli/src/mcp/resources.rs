@@ -174,6 +174,20 @@ fn is_bundle_artifact(relative: &str) -> bool {
     (is_report || at_root) && is_offered(Path::new(&normalised))
 }
 
+/// Serialises the tests that touch the registry.
+///
+/// The registry is process-wide by design — it describes the one bundle this *session*
+/// produced — and `cargo test` runs a binary's tests on many threads. Any test that
+/// registers or reads it must hold this first, or another test replaces the registry
+/// underneath it. It lives here rather than inside this file's own test module because
+/// `mcp::tests` reaches the registry through the protocol and has to take the same lock;
+/// when it did not, it failed roughly one run in ten.
+#[cfg(test)]
+pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static SERIALISE: Mutex<()> = Mutex::new(());
+    SERIALISE.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 /// Replaces the registry with the artifacts of the bundle just produced.
 ///
 /// `staging` is where the run assembled it and `archive` is what it wrote; whichever
@@ -276,12 +290,9 @@ mod tests {
     use super::*;
 
     /// The registry is process-wide, so these tests take a lock rather than racing each
-    /// other into one another's fixtures.
-    static SERIALISE: Mutex<()> = Mutex::new(());
-
-    fn guard() -> std::sync::MutexGuard<'static, ()> {
-        SERIALISE.lock().unwrap_or_else(|error| error.into_inner())
-    }
+    /// other into one another's fixtures. Shared with `mcp::tests`, which reaches the
+    /// same registry through the protocol.
+    use super::test_guard as guard;
 
     fn bundle() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
