@@ -51,9 +51,12 @@ inputs:
     required: false
     default: "codepack.sarif"
   ref:
-    description: "Git ref of codepack to install. Pin this for reproducible runs."
+    description: >-
+      Git ref of codepack to install: a tag, a branch, or a full commit sha. Defaults to
+      a pinned commit so a run is reproducible — `main` moves, and an action that
+      installs from a moving branch cannot promise the same result twice.
     required: false
-    default: "main"
+    default: "e782e85"
 
 outputs:
   exit-code:
@@ -70,23 +73,39 @@ runs:
     # yet (stage S14), and an action that curls an unsigned binary from the internet
     # would be doing the exact thing this tool exists to argue against. GitHub-hosted
     # runners ship a Rust toolchain, so this needs no toolchain action.
+    #
+    # Every input reaches these scripts through `env:`, never through `${{ }}` inside
+    # `run:`. An expression is expanded *before* the shell starts, so its text becomes
+    # part of the script — a value containing `$(…)`, a backtick or a quote is then code,
+    # not data. In a workflow triggered by `pull_request_target` or `issue_comment` that
+    # text can come from a stranger. For an action whose whole purpose is finding
+    # secrets, handing the runner's token to one would be a particularly poor irony.
     - name: Install codepack
       shell: bash
+      env:
+        CODEPACK_REF: ${{ inputs.ref }}
       run: |
         set -e
         if command -v codepack >/dev/null 2>&1; then
           echo "codepack is already on PATH; using it."
           exit 0
         fi
+
+        # A ref is a tag, a branch or a commit; nothing else is accepted, so a value that
+        # tried to be an argument or a URL stops here rather than reaching cargo.
+        if ! printf '%s' "$CODEPACK_REF" | grep -Eq '^[A-Za-z0-9._/-]{1,128}$'; then
+          echo "::error::ref must be a plain git ref; got: $CODEPACK_REF"
+          exit 2
+        fi
+
         # A full commit sha is a `--rev`; anything else is a branch or a tag. Cargo
         # rejects the wrong one rather than guessing, so the choice is made here.
-        ref='${{ inputs.ref }}'
-        if printf '%s' "$ref" | grep -Eq '^[0-9a-f]{40}$'; then
-          selector=(--rev "$ref")
-        elif printf '%s' "$ref" | grep -Eq '^v[0-9]'; then
-          selector=(--tag "$ref")
+        if printf '%s' "$CODEPACK_REF" | grep -Eq '^[0-9a-f]{40}$'; then
+          selector=(--rev "$CODEPACK_REF")
+        elif printf '%s' "$CODEPACK_REF" | grep -Eq '^v[0-9]'; then
+          selector=(--tag "$CODEPACK_REF")
         else
-          selector=(--branch "$ref")
+          selector=(--branch "$CODEPACK_REF")
         fi
         cargo install --locked --git https://github.com/dimbo1324/codepack \
           "${selector[@]}" codepack-cli
@@ -94,6 +113,13 @@ runs:
     - name: Scan
       id: scan
       shell: bash
+      env:
+        CODEPACK_PROJECT: ${{ inputs.project }}
+        CODEPACK_FAIL_ON: ${{ inputs.fail-on }}
+        CODEPACK_HISTORY: ${{ inputs.history }}
+        CODEPACK_SINCE: ${{ inputs.since }}
+        CODEPACK_MAX_COMMITS: ${{ inputs.max-commits }}
+        CODEPACK_SARIF: ${{ inputs.sarif }}
       run: |
         # `set -e` is deliberately NOT used: exit code 3 is a *result*, not a crash, and
         # this step has to read it before deciding anything. GitHub runs `bash -eo
@@ -101,18 +127,40 @@ runs:
         # status explicitly.
         set +e
 
-        args=(scan "${{ inputs.project }}" --fail-on "${{ inputs.fail-on }}")
+        # GitHub does not type-check `inputs`, so the two values that steer behaviour are
+        # checked against a whitelist here. A typo becomes an error rather than a silently
+        # different scan.
+        case "$CODEPACK_FAIL_ON" in
+          critical|high|medium|low) ;;
+          *) echo "::error::fail-on must be critical, high, medium or low; got: $CODEPACK_FAIL_ON"; exit 2 ;;
+        esac
+        case "$CODEPACK_HISTORY" in
+          true|false) ;;
+          *) echo "::error::history must be true or false; got: $CODEPACK_HISTORY"; exit 2 ;;
+        esac
+        if ! printf '%s' "$CODEPACK_MAX_COMMITS" | grep -Eq '^[0-9]+$'; then
+          echo "::error::max-commits must be a number; got: $CODEPACK_MAX_COMMITS"
+          exit 2
+        fi
 
-        if [ "${{ inputs.history }}" = "true" ]; then
-          args+=(--history --max-commits "${{ inputs.max-commits }}")
-          if [ -n "${{ inputs.since }}" ]; then
-            args+=(--since "${{ inputs.since }}")
+        args=(scan "$CODEPACK_PROJECT" --fail-on "$CODEPACK_FAIL_ON")
+
+        if [ "$CODEPACK_HISTORY" = "true" ]; then
+          args+=(--history --max-commits "$CODEPACK_MAX_COMMITS")
+          if [ -n "$CODEPACK_SINCE" ]; then
+            args+=(--since "$CODEPACK_SINCE")
           fi
         fi
 
-        if [ -n "${{ inputs.sarif }}" ]; then
-          args+=(--sarif "${{ inputs.sarif }}")
-          echo "sarif-file=${{ inputs.sarif }}" >> "$GITHUB_OUTPUT"
+        if [ -n "$CODEPACK_SARIF" ]; then
+          args+=(--sarif "$CODEPACK_SARIF")
+          # A heredoc delimiter, because a value containing a newline would otherwise let
+          # a caller append step outputs of its own choosing.
+          {
+            echo "sarif-file<<CODEPACK_EOF"
+            printf '%s\n' "$CODEPACK_SARIF"
+            echo "CODEPACK_EOF"
+          } >> "$GITHUB_OUTPUT"
         fi
 
         codepack "${args[@]}"
@@ -120,8 +168,8 @@ runs:
         echo "exit-code=$status" >> "$GITHUB_OUTPUT"
 
         case $status in
-          0) echo "::notice::codepack found nothing at or above ${{ inputs.fail-on }}." ;;
-          3) echo "::error::codepack found secrets at or above ${{ inputs.fail-on }}." ;;
+          0) echo "::notice::codepack found nothing at or above $CODEPACK_FAIL_ON." ;;
+          3) echo "::error::codepack found secrets at or above $CODEPACK_FAIL_ON." ;;
           *) echo "::error::codepack failed with exit code $status." ;;
         esac
         exit $status
