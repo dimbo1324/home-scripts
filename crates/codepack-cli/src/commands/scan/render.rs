@@ -140,6 +140,13 @@ pub(super) fn print_history_notice(report: &ScanReport) {
             history.skipped_large_blobs
         ));
     }
+    if history.skipped_unsafe_paths > 0 {
+        output::line(format!(
+            "WARNING:   {} tree entr(ies) named a path outside the repository and were NOT \
+             scanned. That name is itself worth investigating.",
+            history.skipped_unsafe_paths
+        ));
+    }
 }
 
 /// Says how many findings the allowlist accepted, and from which file.

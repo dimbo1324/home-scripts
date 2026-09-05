@@ -50,6 +50,10 @@ pub(crate) struct ScanReport {
     pub baseline: Option<String>,
 }
 
+fn is_zero(count: &usize) -> bool {
+    *count == 0
+}
+
 /// What a history walk actually covered. Every field here exists so a partial answer
 /// cannot pass for a complete one.
 #[derive(Debug, Serialize)]
@@ -60,6 +64,10 @@ pub(crate) struct HistorySummary {
     pub truncated: bool,
     /// Blobs skipped for being too large to be worth materialising.
     pub skipped_large_blobs: usize,
+    /// Tree entries skipped for naming a path outside the temporary root. Absent from
+    /// the payload when zero, which is an additive change and needs no schema bump.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub skipped_unsafe_paths: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
 }

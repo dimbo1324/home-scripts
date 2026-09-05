@@ -182,6 +182,17 @@ pub(crate) fn build_staged_with_cancel(
         )?
     };
 
+    // Not a silent skip: a staged entry whose path climbs out of the tree is a fact
+    // about the repository, and a scan that quietly did not read it must say so, or
+    // "nothing found" covers less than the reader believes.
+    if staged.unsafe_paths() > 0 {
+        crate::output::note(format!(
+            "WARNING: {} staged entr(ies) named a path outside the working tree and were \
+             NOT scanned. A repository whose index carries such a name is worth a look.",
+            staged.unsafe_paths()
+        ));
+    }
+
     let (screened, baseline) = screen_all(&context.root, baseline_options, &result)?;
     Ok(assemble(
         context,

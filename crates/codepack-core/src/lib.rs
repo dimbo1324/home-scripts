@@ -18,8 +18,8 @@ pub use classify::{
 };
 pub use error::{CoreError, Result};
 pub use paths::{
-    AppPaths, DestinationError, canonicalize_existing, resolve_prospective,
-    validate_destination_outside,
+    AppPaths, DestinationError, UnsafeRelativePath, canonicalize_existing, resolve_prospective,
+    safe_join, validate_destination_outside,
 };
 pub use progress::{
     LogEvent, LogLevel, ProgressEvent, ProgressReceiver, ProgressSender, progress_channel,

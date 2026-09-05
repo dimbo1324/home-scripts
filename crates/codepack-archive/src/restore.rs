@@ -2,31 +2,25 @@
 //! `restore_archives.py` script into a library function: `restore_archive_set` reads
 //! `ARCHIVE_SET_MANIFEST.json` and extracts every listed part.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
 use crate::error::{ArchiveError, Result};
 
-/// Validates `member_name` lexically — no `std::fs::canonicalize`, which requires the
-/// path to already exist and would defeat pre-write validation for a path that does
-/// not exist yet. Only `Component::Normal` segments are accepted; `ParentDir`,
-/// `RootDir`, `Prefix` (Windows drive/UNC), and even `CurDir` are all rejected, matching
-/// the "only normal segments allowed" contract exactly (real ZIP member names never
-/// legitimately need a `.`/`..` component).
+/// Validates `member_name` lexically and joins it onto `destination`.
+///
+/// The rule itself is [`codepack_core::safe_join`]; this keeps the archive crate's own
+/// name and error for it, because "unsafe archive member path" is what a caller here
+/// needs to read. The rule moved down to `codepack-core` when a third caller appeared
+/// that is not about archives at all: paths taken from someone else's git tree
+/// (audit No. 10).
 pub fn safe_member_target(destination: &Path, member_name: &str) -> Result<PathBuf> {
-    let mut relative = PathBuf::new();
-    for component in Path::new(member_name).components() {
-        match component {
-            Component::Normal(part) => relative.push(part),
-            _ => {
-                return Err(ArchiveError::UnsafeMemberPath {
-                    member: member_name.to_string(),
-                });
-            }
+    codepack_core::safe_join(destination, Path::new(member_name)).map_err(|_| {
+        ArchiveError::UnsafeMemberPath {
+            member: member_name.to_string(),
         }
-    }
-    Ok(destination.join(relative))
+    })
 }
 
 /// What an archive is allowed to expand into.

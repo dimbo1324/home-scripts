@@ -85,6 +85,10 @@ pub(crate) struct HistoryContent {
     pub truncated: bool,
     /// Blobs skipped for exceeding [`MAX_BLOB_BYTES`].
     pub skipped_large_blobs: usize,
+    /// Tree entries refused for naming a path that would not stay under the temporary
+    /// root. Counted rather than dropped quietly: such an entry is a finding about the
+    /// repository, not noise.
+    pub skipped_unsafe_paths: usize,
 }
 
 impl HistoryContent {
@@ -158,6 +162,7 @@ pub(crate) fn collect(project_root: &Path, options: &HistoryOptions) -> Result<H
     let mut commits_walked = 0usize;
     let mut truncated = false;
     let mut skipped_large_blobs = 0usize;
+    let mut skipped_unsafe_paths = 0usize;
 
     for id in revwalk {
         if options.max_commits != 0 && commits_walked >= options.max_commits {
@@ -236,7 +241,17 @@ pub(crate) fn collect(project_root: &Path, options: &HistoryOptions) -> Result<H
             // Each distinct blob gets its own directory, named for its id: the same path
             // legitimately holds different content in different commits, and writing
             // them over each other would scan only the last one.
-            let relative = PathBuf::from(short_oid(entry.id())).join(repo_path);
+            // `repo_path` is the path as the foreign repository recorded it, and this
+            // command exists to be run against foreign history — on a fork in CI, on a
+            // pull request from the GitHub action. `libgit2` does not validate tree entry
+            // names the way `git fsck` does, so an entry spelled `../..` or as an absolute
+            // path would otherwise have this loop write a blob outside the temporary
+            // directory (audit No. 10).
+            let Ok(safe_repo_path) = codepack_core::safe_join(Path::new(""), repo_path) else {
+                skipped_unsafe_paths += 1;
+                continue;
+            };
+            let relative = PathBuf::from(short_oid(entry.id())).join(safe_repo_path);
             let destination = directory.path().join(&relative);
             if let Some(parent) = destination.parent() {
                 std::fs::create_dir_all(parent).map_err(|source| CliError::Read {
@@ -265,6 +280,7 @@ pub(crate) fn collect(project_root: &Path, options: &HistoryOptions) -> Result<H
         commits_walked,
         truncated,
         skipped_large_blobs,
+        skipped_unsafe_paths,
     })
 }
 
@@ -360,6 +376,53 @@ mod tests {
 
     fn repository(root: &Path) -> Repository {
         Repository::init(root).unwrap()
+    }
+
+    /// A tree entry whose recorded name climbs out of the repository (audit No. 10).
+    ///
+    /// The tree object is written straight into the object database: `git2`'s
+    /// `TreeBuilder` and its index both validate entry names, and that validation is
+    /// exactly what a hostile repository does not perform on itself. `git fsck` would
+    /// reject this; `libgit2` reading a packfile does not, and this command exists to be
+    /// run against repositories nobody here controls.
+    #[test]
+    fn a_tree_entry_that_escapes_the_repository_is_refused_and_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repository(dir.path());
+        commit_file(&repo, "a.txt", "clean\n", "first");
+
+        let blob = repo.blob(b"AWS_KEY = 'leaked'\n").unwrap();
+        let mut tree_bytes = Vec::new();
+        tree_bytes.extend_from_slice(b"100644 ../escape.txt\0");
+        tree_bytes.extend_from_slice(blob.as_bytes());
+        let tree_id = repo
+            .odb()
+            .unwrap()
+            .write(git2::ObjectType::Tree, &tree_bytes)
+            .unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let signature = Signature::now("Test", "test@example.local").unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "hostile",
+            &tree,
+            &[&parent],
+        )
+        .unwrap();
+
+        let history = collect(dir.path(), &HistoryOptions::default()).unwrap();
+
+        assert_eq!(history.skipped_unsafe_paths, 1);
+        assert!(
+            history
+                .blobs()
+                .iter()
+                .all(|blob| !blob.repo_path.contains("escape")),
+            "the escaping entry must not have been materialised"
+        );
     }
 
     #[test]

@@ -64,6 +64,7 @@ pub(crate) fn build_history_with_cancel(
         commits_walked: history.commits_walked,
         truncated: history.truncated,
         skipped_large_blobs: history.skipped_large_blobs,
+        skipped_unsafe_paths: history.skipped_unsafe_paths,
         since: args.since.clone(),
     };
 

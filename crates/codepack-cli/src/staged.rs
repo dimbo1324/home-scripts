@@ -35,6 +35,10 @@ use crate::error::{CliError, Result};
 pub(crate) struct StagedContent {
     directory: tempfile::TempDir,
     relative_files: Vec<PathBuf>,
+    /// Staged paths refused for not staying under the temporary root. Reported rather
+    /// than silently dropped: a repository whose tree carries such a name is itself
+    /// something the user should hear about.
+    unsafe_paths: usize,
 }
 
 impl StagedContent {
@@ -51,6 +55,12 @@ impl StagedContent {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.relative_files.is_empty()
+    }
+
+    /// Staged entries whose recorded path would not have stayed under the temporary
+    /// root, and were therefore not materialised or scanned.
+    pub(crate) fn unsafe_paths(&self) -> usize {
+        self.unsafe_paths
     }
 }
 
@@ -98,6 +108,7 @@ pub(crate) fn collect(project_root: &Path) -> Result<StagedContent> {
         source,
     })?;
     let mut relative_files = Vec::new();
+    let mut unsafe_paths = 0usize;
 
     for delta in diff.deltas() {
         // Deleted paths carry nothing into the commit.
@@ -120,7 +131,24 @@ pub(crate) fn collect(project_root: &Path) -> Result<StagedContent> {
             continue;
         };
 
-        let destination = directory.path().join(relative);
+        // The path as git recorded it, in a repository this command is designed to be
+        // pointed at without owning: `--staged` runs in a pre-commit hook, and the same
+        // materialisation backs a scan of somebody else's checkout. Writing a blob
+        // outside the temporary directory is exactly the escape invariant I7 exists to
+        // prevent (audit No. 10).
+        //
+        // Defence in depth here, unlike its twin in `history_scan`: `libgit2`'s own
+        // `Index::add` refuses a path containing `..`, so an index this process builds
+        // cannot carry one — but an index *file* written by something else and read back
+        // is not validated the same way, and this loop should not be the thing that
+        // depends on which. No end-to-end fixture covers it: constructing such an index
+        // means writing the on-disk index format, checksum included, which needs a SHA-1
+        // dependency the project does not have and would not be worth adding for one
+        // test. The rule itself is covered in `codepack_core::paths`.
+        let Ok(destination) = codepack_core::safe_join(directory.path(), relative) else {
+            unsafe_paths += 1;
+            continue;
+        };
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent).map_err(|source| CliError::Read {
                 path: parent.to_path_buf(),
@@ -137,6 +165,7 @@ pub(crate) fn collect(project_root: &Path) -> Result<StagedContent> {
     Ok(StagedContent {
         directory,
         relative_files,
+        unsafe_paths,
     })
 }
 

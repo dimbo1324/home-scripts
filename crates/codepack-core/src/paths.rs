@@ -200,6 +200,45 @@ pub fn canonicalize_existing(path: &std::path::Path) -> std::io::Result<std::pat
     Ok(stripped.unwrap_or(canonical))
 }
 
+/// A relative path from an untrusted source that would not stay under its base.
+#[derive(Debug, thiserror::Error)]
+#[error("unsafe relative path: {path}")]
+pub struct UnsafeRelativePath {
+    pub path: String,
+}
+
+/// Joins an **untrusted** relative path onto `base`, refusing anything that would not
+/// stay underneath it.
+///
+/// Lexical on purpose: `canonicalize` needs the path to exist, which defeats the whole
+/// point of checking before writing. Only `Component::Normal` segments are accepted —
+/// `ParentDir`, `RootDir`, `Prefix` (a Windows drive or UNC root) and even `CurDir` are
+/// all refused. An absolute path matters most: `Path::join` with one discards the base
+/// entirely, so `base.join("C:/Users/victim/x")` is simply that path, and the base the
+/// caller thought it was confining things to never applies.
+///
+/// Lives here rather than in `codepack-archive` because the untrusted relative path is
+/// not an archive-only shape: a ZIP member name, a part name in a bundle manifest and a
+/// path recorded in someone else's git tree are the same problem, and the third of those
+/// had no check at all until audit No. 10.
+pub fn safe_join(
+    base: &std::path::Path,
+    untrusted_relative: &std::path::Path,
+) -> std::result::Result<PathBuf, UnsafeRelativePath> {
+    let mut relative = PathBuf::new();
+    for component in untrusted_relative.components() {
+        match component {
+            std::path::Component::Normal(part) => relative.push(part),
+            _ => {
+                return Err(UnsafeRelativePath {
+                    path: untrusted_relative.to_string_lossy().into_owned(),
+                });
+            }
+        }
+    }
+    Ok(base.join(relative))
+}
+
 /// A destination that would be written inside the project it reads from.
 ///
 /// Its own type rather than a variant of [`crate::CoreError`]: every caller wraps it in
@@ -307,6 +346,51 @@ pub fn validate_destination_outside(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn safe_join_keeps_an_ordinary_relative_path() {
+        let joined = safe_join(
+            std::path::Path::new("/base"),
+            std::path::Path::new("src/main.rs"),
+        )
+        .expect("an ordinary relative path is fine");
+        assert_eq!(
+            joined,
+            std::path::Path::new("/base").join("src").join("main.rs")
+        );
+    }
+
+    #[test]
+    fn safe_join_refuses_everything_that_would_leave_the_base() {
+        let base = std::path::Path::new("/base");
+        for hostile in [
+            "../escape.txt",
+            "a/../../escape.txt",
+            "/etc/passwd",
+            "./a.txt",
+            r"C:\Users\victim\secret.zip",
+        ] {
+            assert!(
+                safe_join(base, std::path::Path::new(hostile)).is_err(),
+                "{hostile} should not join safely"
+            );
+        }
+    }
+
+    /// The case that makes this a *security* check rather than tidiness: `Path::join`
+    /// with an absolute path throws the base away entirely, so an unchecked join silently
+    /// stops confining anything at all.
+    #[test]
+    // The lint exists to catch exactly this mistake, which is what makes it worth
+    // demonstrating here: the assertion below is the reason `safe_join` exists, and
+    // clippy cannot see it in the untrusted string a caller actually passes.
+    #[allow(clippy::join_absolute_paths)]
+    fn a_plain_join_with_an_absolute_path_discards_the_base() {
+        let base = std::path::Path::new("/base");
+        let unchecked = base.join("/etc/passwd");
+        assert!(!unchecked.starts_with(base), "{}", unchecked.display());
+        assert!(safe_join(base, std::path::Path::new("/etc/passwd")).is_err());
+    }
 
     #[test]
     fn a_destination_inside_the_source_is_refused_and_nothing_is_created() {
