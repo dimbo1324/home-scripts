@@ -1,196 +1,81 @@
 # Task Checklist
 
-**Task:** A quality pass over the existing code — no new business logic. Find genuine
-weak points, harden them, and make what is there more modular and maintainable.
+**Task:** Fix every finding in `AUDIT-2026-09-05.txt` — 40 findings, worst first.
 
 **Date:** 2026-09-05
-**Branch:** refactor/harden-extraction-and-split-modules
+**Branch:** fix/audit-2026-09-05
 
-Owner instruction, 2026-09-05: merge and push the previous branch, then improve the
-existing code — security, readability, maintainability, and "as object-oriented as
-possible" — without introducing new behaviour. Explicitly: *if something does not need
-changing, do not change it.*
+Owner instruction, 2026-09-05: work through the whole audit in one branch, most serious
+first, with careful intermediate commits; then update the documentation, produce a fresh
+`.exe`, merge to `main`, push, delete every branch but `main` (local and remote), and shut
+the machine down.
 
-## On the object-orientation request, stated before acting
+## How this is being worked
 
-Rust is not class-oriented, and forcing inheritance hierarchies onto it produces worse
-code, not better. What carries over from OO — and what this task actually pursues — is
-encapsulation (nothing public that does not need to be), cohesion (a module doing one
-thing), and programming against an interface rather than a concrete type. The codebase
-already does the third well: `FileScanCache`, `AiProvider` and `ReportJob` are trait or
-function-table seams. This task fixes the first two where they are genuinely broken.
+One commit per coherent group rather than per finding: several findings are the *same*
+defect in different copies, and the audit's own summary says so — its central observation
+is that one rule is implemented in several places and the copies drifted. Fixing a group
+together is what stops the next copy from drifting too.
 
-## What the audit found, and what it cleared
+Where a finding asks for an owner decision rather than a repair (No. 1's redaction of
+copied files, No. 26's fate of the API half), the honest half is done now and the question
+goes into the decisions log rather than being invented.
 
-Measured rather than assumed. Cleared, and therefore **not touched**:
+## CRITICAL
 
-- No `unsafe` anywhere in production code.
-- Every `panic!`/`todo!`/`unimplemented!` is in a test.
-- HTML generation escapes correctly — `escape_html` is applied at every interpolation in
-  `dashboard.rs` and `overview.rs` (a line-based search suggested otherwise; reading the
-  call sites showed the escaping sits on the argument lines).
-- The frontend has no `any`, no `@ts-ignore`, no non-null assertions.
-- Path-traversal safety on extraction is sound: `enclosed_name()` **and** an independent
-  lexical check, failing closed on the first bad member.
-- Of six modules over 600 raw lines, four are under the limit once their inline tests are
-  excluded, and two more are test files, which the rules exempt. Only two are real.
+- [ ] **No. 2** — package.json scripts reach three reports unredacted while a fourth
+      redacts them and explains why. One shared extractor returning already-redacted
+      values, so the mistake becomes unexpressible; plus a bundle-wide test.
+- [ ] **No. 5** — the network-isolation gate is bypassed by ordinary TOML
+      (`[dependencies.reqwest]`). Parse with a real TOML parser, take the package name
+      from `[package]`, walk `workspace.members`, drop the duplicate `ureq`, add the
+      negative test that would have caught it.
+- [ ] **No. 6** — six Tauri commands take a path from the webview and unpack archives and
+      open files with it. Validate against the export history, unpack under app data,
+      confine `open_path`.
+- [ ] **No. 4** — `action.yml` interpolates `${{ inputs.* }}` inside `run:`. Pass inputs
+      through `env:`, validate against a whitelist, protect `GITHUB_OUTPUT`, pin `ref`.
+- [ ] **No. 1** — README promises secrets never reach the archive; copied source files are
+      not redacted. Correct the README and the misleading docstring now; record the
+      behaviour question as an owner decision.
 
-## Preparation
+## HIGH
 
-- [+] Branch from up-to-date `main`, commit this checklist before the work
+- [ ] **No. 3** — I2 is checked only by the CLI; move it into `run_export`
+- [ ] **No. 13** — the CLI's I2 check creates the directory before checking
+- [ ] **No. 7** — placeholder recognition is a prefix match; make it exact
+- [ ] **No. 8** — `restore_archive_set` applies the budget per volume, not per set
+- [ ] **No. 9** — unbounded recursion depth on directory walks
+- [ ] **No. 10** — git blob contents written to disk without path validation
+- [ ] **No. 11** — the CLI prints error text unredacted
+- [ ] **No. 12** — `ERROR_*.txt` diagnostics written into the bundle unredacted
 
-## 1 — Security: a decompression bomb has nothing stopping it
+## MEDIUM (14 - 27)
 
-- [+] `extract_zip_safely` streams every member with `std::io::copy` and no ceiling, and
-      `codepack verify` feeds it an archive that came from somebody else — the one input
-      in this product that is untrusted by design. A small archive expanding to hundreds
-      of gigabytes fills the disk.
-- [+] Add a budget: total decompressed bytes, per-member bytes, and member count. Fail
-      closed, naming the limit that was hit.
-- [+] Keep `extract_zip_safely`'s signature so no caller breaks; the limits are a value
-      with a `Default`, and a caller that needs different ones passes them.
-- [+] `read_zip_entry_to_string` gets the same per-member ceiling.
+- [ ] No. 14 verify re-reads a file per finding · No. 15 text dump built wholly in memory
+- [ ] No. 16 detectors allocate per line · No. 17 watch throttle drops the last change
+- [ ] No. 18 MCP hangs when stdout closes first · No. 19 cache key tied to crate version
+- [ ] No. 20 21 of 32 reports read files without redacting · No. 21 absolute paths with
+      the account name reach the bundle · No. 22 no total budget on `scan --history`
+- [ ] No. 23 duplicated path logic · No. 24 two file-group tables · No. 25 stale allowlist
+      docs · No. 26 the API half of `codepack-ai` is unreachable · No. 27 dead config
+      functions
 
-## 2 — Two modules genuinely past the project's own 600-line limit
+## LOW (28 - 40)
 
-Both were pushed over the line by the previous task, so this is cleaning up after it.
-
-- [+] `codepack-cli/src/commands/scan.rs` (757 production lines) -> directory module
-- [+] `codepack-security/src/scan/mod.rs` (748) -> split by responsibility
-- [+] The public surface of each stays exactly as it is: this is code movement, not an
-      API change.
-
-## 3 — Encapsulation: production API widened for tests
-
-- [+] `codepack_engine::explain` exports five helpers (`default_reason`,
-      `relative_to_project`, `resolve_through_existing_ancestor`, `plan_spelling`,
-      `skipped_directory_on_path`) that nothing outside the crate legitimately needs —
-      they are `pub` only because CLI tests reach them. Also from the previous task.
-- [+] Narrow them, and move the tests that exercise them into the crate that owns them.
-
-## 4 — One `unwrap` without the justification the rules require
-
-- [+] `xtask/src/sync_agents.rs`: `path.file_name().unwrap()`. The rule allows `unwrap`
-      only "where the invariant is proven by an adjacent comment". Restructure so the
-      name is never an `Option` rather than adding a comment to excuse it.
-
-## Verification
-
-- [+] `cargo xtask gate` green — all eight sections, exit 0. 1424 Rust tests across 56
-      binaries, `cargo deny` clean, frontend 137 files / 0 errors, 78 `scripts/` tests,
-      `AGENTS.md` in sync, network isolation ok
-- [+] The refactor is behaviour-preserving: every test that passed before passes after,
-      and none was rewritten to match new behaviour. Eight tests were *added*, all for
-      the decompression budget, which is new behaviour by design
-- [+] `cargo xtask sync-agents --check` still reports `AGENTS.md` byte-identical after
-      the xtask change, which is what makes that one a refactor rather than a change
-- [+] Module sizes re-measured afterwards: no production module is over the limit; the
-      only files above it are test files, which the rules exempt
-
-## Also audited and deliberately left alone
-
-Reported so the next reader knows these were checked rather than skipped:
-
-- **The desktop shell.** The webview holds no filesystem, shell or HTTP permission; the
-  CSP is `default-src 'self'` with no remote origin; lock poisoning is handled everywhere
-  (`.lock().unwrap()` appears nowhere) and two tests prove the registry survives a thread
-  panicking while holding it.
-- **HTML generation.** `escape_html` is applied at every interpolation in `dashboard.rs`
-  and `overview.rs`.
-- **The frontend.** No `any`, no `@ts-ignore`, no non-null assertions.
-- **Path traversal.** Two independent checks per member, failing closed.
-- **`verify.rs`, `mcp/mod.rs`, `mcp/tools.rs`, `git_report.rs`** — all under the limit
-  once inline tests are excluded, so splitting them would have been churn.
-
-## Not done, and why
-
-- **No OO rewrite.** Rust has no class hierarchies, and adding trait objects where a
-  concrete type is correct would cost indirection and readability for nothing. The
-  seams that genuinely deserve an interface already have one.
-- **No behaviour changed** anywhere except the new extraction ceiling, which is the point
-  of item 1.
+- [ ] No. 28 CSP `unsafe-inline` · No. 29 one unescaped HTML parameter · No. 30 ZIP64 and
+      buffering · No. 31 `fs::copy` follows symlinks · No. 32 byte-offset slicing
+- [ ] No. 33 advisory ignores without review dates · No. 34 cache read whole · No. 35
+      fingerprint built with `format!` per byte · No. 36 duplicated page CSS
+- [ ] No. 37 "Eleven" vs "Twelve" commands · No. 38 version in two places · No. 39
+      duplicate entry in the xtask rule list · No. 40 quadratic pre-commit check
 
 ## Completion
 
-- [+] Checklist filled with `+`/`-`
-- [+] Final report in Russian
-- [-] Not merged or pushed: no publish was requested for this branch. The gate is green,
-      so the merge is available on request.
-
----
-
-# Follow-on task, same branch: frontend polish and harder tests
-
-**Date:** 2026-09-05
-
-Owner instruction: modernise the frontend a little — cosmetic only, no redesign — and add
-more tests, especially for contentious and ambiguous cases. Merge and push once green.
-
-## 1 — Frontend
-
-The "no visual polish without a direct requirement" rule does not bite here: the
-requirement is direct. The design system was already mature (tokens, `focus-visible`,
-reduced motion, themed scrollbars, no CSS framework by owner decision), so this adds what
-was missing rather than repainting what was not.
-
-- [+] **A defect found by opening the app rather than reading it.** The palette was
-      defined only under `[data-theme=...]`, and that attribute is stamped by `initTheme`,
-      which runs *after* settings load. Until then — and forever when loading fails —
-      every colour token was undefined, so the startup-failure screen rendered in browser
-      defaults: near-black text on a near-black page, on the one screen that must be
-      readable. The light palette is now also the bare `:root` default. Verified in a
-      browser: the same screen now renders with the real palette.
-- [+] Native checkboxes, radios and the text caret follow `--accent` instead of the
-      engine's default blue (most visible in dark mode)
-- [+] Headings balance across two lines; prose avoids a one-word last line
-- [+] Standard `scrollbar-width`/`scrollbar-color` beside the WebKit rules, for the day
-      macOS and Linux return
-- [+] The main pane reserves the scrollbar's width, so filtering a list no longer shifts
-      the page sideways under the pointer, and no longer passes scroll to the shell
-- [+] Two labels that ellipsise now say what they are on hover
-- [-] The interface itself could not be viewed: without the Tauri bridge the app stops at
-      its startup screen. What was verified in the browser is the base layer and that
-      failure screen; the rest rests on typecheck, lint, Prettier and a clean build.
-
-## 2 — Tests for the contentious cases, and what they found
-
-30 new tests. Three of them failed when written, and all three were right to.
-
-- [+] **Redacting a placeholder was not idempotent.** Redaction runs in more than one
-      pass by design; the later pass treated an existing `<REDACTED:s1>` as a fresh secret
-      and issued `s2`. One credential therefore came out labelled `s1` in
-      `03_text_dump.txt` and `s2` in `06_security_scan.json` — matching a value across a
-      bundle is the *only* thing labels are for, so the feature was failing quietly.
-      Fixed in one place, by making the substitution idempotent; six unit tests pin the
-      invariant and a pipeline test pins the user-visible promise. The golden references
-      confirm the unlabelled default output did not move.
-- [+] **A finding in both `.codepack-allow` and a baseline** is reported as reviewed, not
-      as old. The allowlist runs first, so the stronger statement wins. Pinned, since the
-      order is a decision.
-- [+] **A fingerprint does not change when a credential is rotated in place.** It is
-      computed from the *redacted* message, because deriving it from the value would be a
-      checkable commitment to it (invariant I3, the same reason a hash was rejected for
-      labels). So an accepted entry survives a key rotation. Arguably right for an
-      accepted `.env`, but it is a real property with a security flavour and nobody had
-      written it down. **Worth an owner decision; recorded in the test rather than left
-      to be discovered.**
-- [+] Archive member names where the safe answer is not obvious: backslashes, degenerate
-      and empty names, Windows device names, deep nesting, non-ASCII, and directory
-      entries not consuming the byte budget
-- [+] Scanner input where it is not obvious: CRLF (line numbers and messages), a final
-      line without a newline, empty files, non-ASCII paths, a file that vanished between
-      planning and scanning, an oversized file keeping its filename verdict, and binary
-      content behind a text extension
-- [+] The boundary between the scanner and `verify`: an already-redacted line *is*
-      reported, because shape is all the scanner can judge — `verify` is the layer that
-      knows placeholders
-- [+] Storage: pruning to zero, an opaque stored value, an unusual key
-- [-] Two tests I wrote asserted my assumptions rather than the code, and the code was
-      right both times. Rewritten to pin the real behaviour with the reasoning attached.
-
-## Verification
-
-- [+] `cargo xtask gate` green — eight sections, exit 0, **1454 Rust tests** (1424 before),
-      78 `scripts/` tests, frontend 137 files / 0 errors, `AGENTS.md` in sync, network
-      isolation ok
-- [+] `pnpm --filter @codepack/ui build` clean
+- [ ] Documentation updated (`README.md`, `docs/architecture/*`, `open-questions.md`,
+      `ROADMAP.md` where the shape changed)
+- [ ] `cargo xtask gate` green
+- [ ] Fresh installer built (`cargo xtask package`)
+- [ ] Merged to `main`, pushed
+- [ ] Every branch but `main` deleted, local and remote
+- [ ] Final report in Russian
