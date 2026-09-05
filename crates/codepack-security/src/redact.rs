@@ -214,8 +214,16 @@ fn replace_match(matched: &str, placeholders: Placeholders<'_>) -> String {
 }
 
 /// Replaces every span [`find_redaction_spans`] finds with a redacted placeholder.
-/// Applied to file content before it is included in an export or copied to the
-/// clipboard — see `docs/__arch__/BLUEPRINT.md` §A.4.2.
+///
+/// Two call sites, both of them content this crate's callers *write* themselves: the
+/// text dump (`codepack_engine::text_dump`, artifact `03_text_dump.txt`) and the sterile
+/// copy (`codepack_sanitize`). See `docs/__arch__/BLUEPRINT.md` §A.4.2. The git reports
+/// redact too, but through the wider [`crate::Redactor::redacted_line`].
+///
+/// It is **not** applied to the files an export copies into the archive: `copy_project`
+/// copies byte for byte, and what keeps a credential out of the archive is safe mode's
+/// selection by filename, not a rewrite of what is copied. Whether that should change is
+/// Q39 in `docs/__arch__/open-questions.md`.
 ///
 /// Works line by line because the shapes themselves are line-scoped: the original
 /// patterns excluded `\n` from every value character class, so a value could never span

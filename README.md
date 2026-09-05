@@ -331,8 +331,13 @@ These are held by tests, not by promises in this file:
 - **Privacy is absolute.** No crate reaches the network except the explicit, user-initiated
   AI integration. A quality-gate step reads every manifest and fails the build otherwise.
 - **The source is immutable.** An export never writes inside the folder it reads.
-- **Secrets never reach output.** Not a report, a log, the database, or an archive — never
-  in the clear.
+- **Secrets never reach what codepack writes.** Not a report, a log, the history, the
+  database, an error message, or the text dump — never in the clear.
+- **Copied source files are included unchanged.** An export copies the files it selects
+  byte for byte rather than rewriting them, so what keeps a credential out of the archive
+  is the *selection*: safe mode excludes `.env` files, key material and similarly named
+  files. A live key inside an ordinary source file travels with that file — read the
+  security report and the preview before handing a bundle to someone.
 - **Byte figures are preserved.** Token counts were added alongside, not instead.
 - **Symlinks are never followed**, and extraction is path-traversal safe.
 
