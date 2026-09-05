@@ -29,6 +29,24 @@ All work happens on a copy in the staging directory.
 **Why.** People run this against their working project. Corrupting the source is
 unacceptable under any circumstances, cancellation and failure included.
 
+**How it is enforced (since 2026-09-06).** In `codepack_engine::run_export`, before the
+pipeline computes a single path — the one layer both front ends go through. An output
+directory that resolves inside the source root fails with
+`EngineError::OutputInsideSource`.
+
+It used to be checked only in `codepack-cli`, which left the desktop shell — which calls
+the engine directly — free to stage a bundle inside the user's own working tree, pick it
+up as a source on the next run, and, with `keep_staging_folder = false`, recursively
+delete a directory inside their project.
+
+The comparison runs on a *prospective* path
+(`codepack_core::validate_destination_outside`): the destination is resolved through its
+longest existing ancestor rather than created first. A check that runs `create_dir_all`
+before refusing leaves a stray directory inside the source tree, which is this invariant
+broken by the code meant to hold it — the CLI did exactly that until this date. The same
+function now serves all three callers (engine, CLI `--out`, `codepack-sanitize`), where
+the rule was previously written three times and behaved differently in each.
+
 ## I3. A secret never leaves the redactor
 
 The value of a detected secret never reaches a log, a report, the history, the database,

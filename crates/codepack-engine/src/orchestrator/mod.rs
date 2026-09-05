@@ -122,6 +122,27 @@ pub fn run_export(
     progress: &ProgressSender,
     cancel: &CancellationToken,
 ) -> Result<ExportOutcome> {
+    // Invariant I2, before anything is computed or created. Both shells reach the
+    // pipeline here, so this is the only place that can hold it for both of them.
+    // The resolved pair is used for the comparison and then dropped: `source_root` is the
+    // key this pipeline records projects under, so re-spelling it here would silently
+    // orphan every history row an earlier run wrote under the path as given.
+    if let Err(error) = codepack_core::validate_destination_outside(source_root, output_root) {
+        return Err(match error {
+            codepack_core::DestinationError::Inside {
+                source_root,
+                destination,
+            } => crate::error::EngineError::OutputInsideSource {
+                source_root,
+                output_root: destination,
+            },
+            // An unresolvable path is not an I2 violation; it is a path that is not there.
+            codepack_core::DestinationError::Resolve { path, source } => {
+                crate::error::EngineError::Io { path, source }
+            }
+        });
+    }
+
     let started_at = unix_timestamp_now();
     let log = |message: &str| {
         let _ = progress.send(ProgressEvent::Log(LogEvent {

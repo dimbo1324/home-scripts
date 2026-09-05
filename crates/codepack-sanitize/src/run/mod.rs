@@ -182,7 +182,18 @@ fn archive_members(report: &SterileCopyReport) -> Vec<PathBuf> {
 /// from would modify that project (invariant I2), and a second run would then try to
 /// pack the previous archive into the new one.
 fn validate_archive_path(canonical_source: &Path, archive_path: &Path) -> Result<()> {
-    let prospective = resolve_prospective_path(archive_path)?;
+    let prospective =
+        codepack_core::resolve_prospective(archive_path).map_err(|error| match error {
+            codepack_core::DestinationError::Resolve { path, source } => {
+                SanitizeError::Read { path, source }
+            }
+            // `resolve_prospective` only ever reports a resolution failure; the overlap
+            // variant belongs to `validate_destination_outside`.
+            other => SanitizeError::Read {
+                path: archive_path.to_path_buf(),
+                source: std::io::Error::other(other.to_string()),
+            },
+        })?;
     if prospective.starts_with(canonical_source) {
         return Err(SanitizeError::ArchiveInsideSource {
             source_root: canonical_source.to_path_buf(),
@@ -204,14 +215,22 @@ fn validate_destination(source_root: &Path, destination_root: &Path) -> Result<(
         });
     }
 
-    let canonical_source = canonicalize(source_root)?;
-    let prospective_destination = resolve_prospective_path(destination_root)?;
-    if prospective_destination.starts_with(&canonical_source) {
-        return Err(SanitizeError::DestinationInsideSource {
-            source_root: canonical_source,
-            destination: prospective_destination,
-        });
-    }
+    let canonical_source =
+        match codepack_core::validate_destination_outside(source_root, destination_root) {
+            Ok((canonical_source, _)) => canonical_source,
+            Err(codepack_core::DestinationError::Inside {
+                source_root,
+                destination,
+            }) => {
+                return Err(SanitizeError::DestinationInsideSource {
+                    source_root,
+                    destination,
+                });
+            }
+            Err(codepack_core::DestinationError::Resolve { path, source }) => {
+                return Err(SanitizeError::Read { path, source });
+            }
+        };
 
     std::fs::create_dir_all(destination_root).map_err(|source| SanitizeError::Write {
         path: destination_root.to_path_buf(),
@@ -226,42 +245,6 @@ fn canonicalize(path: &Path) -> Result<PathBuf> {
         path: path.to_path_buf(),
         source,
     })
-}
-
-/// Resolves `path` to an absolute, symlink-free form without creating anything on disk:
-/// canonicalizes the longest existing ancestor (root always qualifies, so this never
-/// fails for that reason), then appends the not-yet-created suffix components in order.
-/// None of those suffix components can be symlinks (they don't exist yet), so the result
-/// is exactly what `canonicalize` would return once the path is actually created.
-fn resolve_prospective_path(path: &Path) -> Result<PathBuf> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|source| SanitizeError::Read {
-                path: path.to_path_buf(),
-                source,
-            })?
-            .join(path)
-    };
-
-    let mut suffix = Vec::new();
-    let mut ancestor = absolute.as_path();
-    while !ancestor.exists() {
-        match (ancestor.file_name(), ancestor.parent()) {
-            (Some(name), Some(parent)) => {
-                suffix.push(name.to_owned());
-                ancestor = parent;
-            }
-            _ => break,
-        }
-    }
-
-    let mut resolved = canonicalize(ancestor)?;
-    for component in suffix.into_iter().rev() {
-        resolved.push(component);
-    }
-    Ok(resolved)
 }
 
 /// The plan stores backslash-joined relative paths regardless of platform (a documented

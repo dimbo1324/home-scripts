@@ -30,6 +30,21 @@ pub enum EngineError {
     #[error("{0}")]
     Explain(String),
 
+    /// Invariant I2, refused at the layer both shells go through.
+    ///
+    /// The CLI checks this too, earlier and with a friendlier message, but that check is
+    /// no longer the only one: the desktop shell called `run_export` without it, so the
+    /// invariant was held by one of the two front ends rather than by the engine that
+    /// defines it.
+    #[error(
+        "refusing to write the bundle into {output_root}: it is inside {source_root}, the \
+         project being exported, and an export never writes into the source folder"
+    )]
+    OutputInsideSource {
+        source_root: PathBuf,
+        output_root: PathBuf,
+    },
+
     #[error("cannot create directory {path}: {source}")]
     Io {
         path: PathBuf,

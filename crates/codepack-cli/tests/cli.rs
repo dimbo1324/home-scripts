@@ -225,6 +225,31 @@ fn export_writes_an_archive_and_records_it_in_history() {
     assert_eq!(runs[0]["run_id"], report["run_id"]);
 }
 
+/// Invariant I2, and the way the check itself used to break it (audit No. 13).
+///
+/// `resolve_output_root` ran `create_dir_all` *before* comparing the paths, so a refused
+/// export still left `dist/bundles` inside the user's project — and inside their
+/// `git status`.
+#[test]
+fn an_output_inside_the_project_is_refused_without_creating_the_directory() {
+    let sandbox = Sandbox::new();
+    let project = sandbox.project().display().to_string();
+    let inside = sandbox.project().join("dist").join("bundles");
+
+    let refused = sandbox.run(&["export", &project, "--out", &inside.display().to_string()]);
+
+    assert_eq!(code(&refused), 1, "stderr = {}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("inside the project being exported"),
+        "stderr = {}",
+        stderr(&refused)
+    );
+    assert!(
+        !sandbox.project().join("dist").exists(),
+        "a refused export must not leave a directory inside the project"
+    );
+}
+
 #[test]
 fn an_exported_bundle_does_not_contain_the_secret_file() {
     // Invariant I3's whole promise, verified through the binary a user runs.

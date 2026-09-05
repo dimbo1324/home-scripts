@@ -200,9 +200,176 @@ pub fn canonicalize_existing(path: &std::path::Path) -> std::io::Result<std::pat
     Ok(stripped.unwrap_or(canonical))
 }
 
+/// A destination that would be written inside the project it reads from.
+///
+/// Its own type rather than a variant of [`crate::CoreError`]: every caller wraps it in
+/// the error the caller's own layer speaks, and each wants to name the operation it was
+/// refusing ("the bundle", "the sterile copy") rather than repeat a generic message.
+#[derive(Debug, thiserror::Error)]
+pub enum DestinationError {
+    #[error("cannot resolve {path}: {source}")]
+    Resolve {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("{destination} is inside {source_root}")]
+    Inside {
+        source_root: std::path::PathBuf,
+        destination: std::path::PathBuf,
+    },
+}
+
+/// Resolves `path` to an absolute, symlink-free form **without creating anything**.
+///
+/// Canonicalizes the longest existing ancestor (a root always exists, so this never fails
+/// for want of one) and re-appends the components that do not exist yet. Those cannot be
+/// symlinks — they are not on disk — so the result is exactly what `canonicalize` would
+/// return once the path is created.
+///
+/// This is what makes an overlap check possible *before* a directory is made. Comparing
+/// the strings a user typed does not work: `.` segments, a lowercase drive letter, an 8.3
+/// short name (`C:\Users\RUNNER~1`) and a junction all spell the same directory
+/// differently, and CI has caught each of them.
+pub fn resolve_prospective(
+    path: &std::path::Path,
+) -> std::result::Result<PathBuf, DestinationError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|source| DestinationError::Resolve {
+                path: path.to_path_buf(),
+                source,
+            })?
+            .join(path)
+    };
+
+    let mut suffix = Vec::new();
+    let mut ancestor = absolute.as_path();
+    while !ancestor.exists() {
+        match (ancestor.file_name(), ancestor.parent()) {
+            (Some(name), Some(parent)) => {
+                suffix.push(name.to_owned());
+                ancestor = parent;
+            }
+            _ => break,
+        }
+    }
+
+    let mut resolved =
+        canonicalize_existing(ancestor).map_err(|source| DestinationError::Resolve {
+            path: ancestor.to_path_buf(),
+            source,
+        })?;
+    for component in suffix.into_iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
+}
+
+/// Invariant I2: nothing an export writes may land inside the folder it reads.
+///
+/// Returns the canonical source root and the resolved destination when the two do not
+/// overlap. The check runs on a *prospective* destination, so it can be answered before
+/// anything exists — and it must be, because a refusal that has already run
+/// `create_dir_all` leaves a stray directory inside a source tree it was never allowed to
+/// touch. That is I2 broken by the check meant to hold it.
+///
+/// One implementation for all three callers (`codepack_engine::run_export`,
+/// `codepack-cli`'s `--out`, `codepack-sanitize`'s destination). The rule used to be
+/// written three times and behaved differently in each: the engine did not check at all,
+/// so the desktop shell was unprotected, and the CLI created the directory first.
+pub fn validate_destination_outside(
+    source_root: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::result::Result<(PathBuf, PathBuf), DestinationError> {
+    let canonical_source =
+        canonicalize_existing(source_root).map_err(|source| DestinationError::Resolve {
+            path: source_root.to_path_buf(),
+            source,
+        })?;
+    let resolved_destination = resolve_prospective(destination)?;
+
+    // `starts_with` compares whole components, so a sibling `project-backup` is not
+    // mistaken for a child of `project`. Equality counts as inside: exporting a project
+    // into itself is the same violation, spelled with a shorter path.
+    if resolved_destination.starts_with(&canonical_source) {
+        return Err(DestinationError::Inside {
+            source_root: canonical_source,
+            destination: resolved_destination,
+        });
+    }
+    Ok((canonical_source, resolved_destination))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_destination_inside_the_source_is_refused_and_nothing_is_created() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = source.path().join("dist").join("bundles");
+
+        let error = validate_destination_outside(source.path(), &destination)
+            .expect_err("writing inside the source violates I2");
+        assert!(
+            matches!(error, DestinationError::Inside { .. }),
+            "{error:?}"
+        );
+        // The point of resolving a prospective path: the refusal leaves no trace.
+        assert!(!source.path().join("dist").exists());
+    }
+
+    #[test]
+    fn the_source_itself_counts_as_inside() {
+        let source = tempfile::tempdir().unwrap();
+        let error = validate_destination_outside(source.path(), source.path())
+            .expect_err("exporting a project into itself is the same violation");
+        assert!(
+            matches!(error, DestinationError::Inside { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_sibling_sharing_a_name_prefix_is_not_inside() {
+        let parent = tempfile::tempdir().unwrap();
+        let source = parent.path().join("project");
+        std::fs::create_dir_all(&source).unwrap();
+        // `project-backup` starts with the same *characters* as `project`; component-wise
+        // comparison is what keeps a textual `starts_with` from refusing it.
+        let destination = parent.path().join("project-backup");
+
+        let (canonical_source, resolved) =
+            validate_destination_outside(&source, &destination).expect("a sibling is outside");
+        assert!(!resolved.starts_with(&canonical_source));
+    }
+
+    #[test]
+    fn a_relative_destination_resolves_against_the_working_directory() {
+        let source = tempfile::tempdir().unwrap();
+        // Relative paths are what a CLI actually receives, and they cannot be compared
+        // with an absolute source root until they are resolved.
+        let (_, resolved) = validate_destination_outside(source.path(), std::path::Path::new("."))
+            .expect("the working directory is not inside a fresh temp dir");
+        assert!(resolved.is_absolute());
+    }
+
+    #[test]
+    fn a_missing_source_reports_a_resolution_failure_rather_than_permitting_the_write() {
+        let parent = tempfile::tempdir().unwrap();
+        let missing = parent.path().join("was-never-here");
+
+        let error = validate_destination_outside(&missing, parent.path())
+            .expect_err("an unresolvable source cannot be checked against");
+        assert!(
+            matches!(error, DestinationError::Resolve { .. }),
+            "{error:?}"
+        );
+    }
 
     #[test]
     fn windows_layout_matches_blueprint_d4() {

@@ -195,24 +195,33 @@ fn resolve_output_root(
         })?,
     };
 
-    std::fs::create_dir_all(&path).map_err(|source| CliError::Read {
-        path: path.clone(),
+    // Checked *before* `create_dir_all`, not after. A refusal that has already created
+    // the directory leaves a stray folder inside the project — I2 broken by the check
+    // that exists to hold it, and rubbish in `git status` besides.
+    //
+    // The engine refuses this too (`EngineError::OutputInsideSource`); this stays because
+    // it is reached before any directory is made and can say more about the fix.
+    let resolved = match codepack_core::validate_destination_outside(source_root, &path) {
+        Ok((_, resolved)) => resolved,
+        Err(codepack_core::DestinationError::Inside { destination, .. }) => {
+            return Err(CliError::message(format!(
+                concat!(
+                    "refusing to write the bundle into {}: it is inside the project being ",
+                    "exported, and the export never writes into the source folder. ",
+                    "Choose a directory outside it."
+                ),
+                destination.display()
+            )));
+        }
+        Err(codepack_core::DestinationError::Resolve { path, source }) => {
+            return Err(CliError::Read { path, source });
+        }
+    };
+
+    std::fs::create_dir_all(&resolved).map_err(|source| CliError::Read {
+        path: resolved.clone(),
         source,
     })?;
-
-    // Compared after creation so both sides can be canonicalized: `--out ./dist` and the
-    // project root must be comparable as real paths, not as the strings the user typed.
-    let resolved = commands::canonicalize_existing(&path)?;
-    if resolved.starts_with(source_root) {
-        return Err(CliError::message(format!(
-            concat!(
-                "refusing to write the bundle into {}: it is inside the project being ",
-                "exported, and the export never writes into the source folder. ",
-                "Choose a directory outside it."
-            ),
-            resolved.display()
-        )));
-    }
     Ok(resolved)
 }
 

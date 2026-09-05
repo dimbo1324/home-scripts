@@ -858,3 +858,84 @@ fn no_bundle_artifact_carries_a_credential_from_a_package_json_script() {
         "the script should still be listed"
     );
 }
+
+/// Invariant I2 at the layer that defines it, not at one of the two shells.
+///
+/// Before audit No. 3 this check lived only in `codepack-cli`, so the desktop — which
+/// calls `run_export` directly — would happily stage a bundle inside the user's own
+/// working tree, pick it up as a source on the next run, and, with
+/// `keep_staging_folder = false`, recursively delete a directory inside their project.
+#[test]
+fn an_output_directory_inside_the_project_is_refused_and_nothing_is_written() {
+    let source = tempfile::tempdir().unwrap();
+    build_fixture(source.path());
+    let db_dir = tempfile::tempdir().unwrap();
+    let output = source.path().join("dist").join("bundles");
+
+    let mut conn = codepack_storage::open(&db_dir.path().join("codepack.db")).unwrap();
+    let (tx, _rx) = codepack_core::progress_channel();
+
+    // `let ... else` rather than `expect_err`: `ExportOutcome` is deliberately not
+    // `Debug`, and deriving it here would be a change to production code for a test.
+    let Err(error) = run_export(
+        &mut conn,
+        source.path(),
+        &output,
+        &Config::default(),
+        &HashMap::new(),
+        &tx,
+        &CancellationToken::new(),
+    ) else {
+        panic!("writing the bundle inside the source violates I2");
+    };
+
+    assert!(
+        matches!(
+            error,
+            codepack_engine::EngineError::OutputInsideSource { .. }
+        ),
+        "{error:?}"
+    );
+    // The refusal must not be the thing that breaks the invariant: no directory is left
+    // behind inside the project, and the fixture is untouched.
+    assert!(!source.path().join("dist").exists());
+    let mut entries: Vec<String> = fs::read_dir(source.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    entries.sort();
+    assert_eq!(
+        entries,
+        vec![".env", ".git", "README.md", "main.py", "tracked.txt"]
+    );
+}
+
+/// The source root itself is the same violation with a shorter path.
+#[test]
+fn the_project_root_itself_is_refused_as_an_output_directory() {
+    let source = tempfile::tempdir().unwrap();
+    build_fixture(source.path());
+    let db_dir = tempfile::tempdir().unwrap();
+
+    let mut conn = codepack_storage::open(&db_dir.path().join("codepack.db")).unwrap();
+    let (tx, _rx) = codepack_core::progress_channel();
+
+    let Err(error) = run_export(
+        &mut conn,
+        source.path(),
+        source.path(),
+        &Config::default(),
+        &HashMap::new(),
+        &tx,
+        &CancellationToken::new(),
+    ) else {
+        panic!("a project cannot be exported into itself");
+    };
+    assert!(
+        matches!(
+            error,
+            codepack_engine::EngineError::OutputInsideSource { .. }
+        ),
+        "{error:?}"
+    );
+}
