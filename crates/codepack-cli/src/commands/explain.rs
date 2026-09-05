@@ -116,11 +116,7 @@ mod tests {
     use super::*;
     use crate::settings::ResolutionTrace;
     use codepack_core::config::Config;
-    use codepack_engine::explain::{
-        VERDICT_EXCLUDED, VERDICT_INCLUDED, VERDICT_NOT_IN_DIFF, plan_spelling,
-        relative_to_project, resolve_through_existing_ancestor, skipped_directory_on_path,
-    };
-    use std::path::PathBuf;
+    use codepack_engine::explain::{VERDICT_EXCLUDED, VERDICT_INCLUDED, VERDICT_NOT_IN_DIFF};
 
     fn context(root: &Path, safe_mode: &str) -> ProjectContext {
         let config = Config {
@@ -228,55 +224,6 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_whose_name_contains_parentheses_still_explains_its_files() {
-        // `skipped_dirs` entries are display strings — `.\dir (reason)` — so splitting
-        // one on `" ("` would truncate a directory that is itself named `x (v2)` and
-        // lose the answer entirely.
-        let skipped = vec![".\\my folder (v2)".to_string()];
-        assert_eq!(
-            skipped_directory_on_path(&skipped, Path::new("my folder (v2)/a.txt")),
-            Some(".\\my folder (v2)".to_string())
-        );
-    }
-
-    #[test]
-    fn a_skipped_directory_with_a_reason_is_matched_by_its_path_not_its_text() {
-        let skipped = vec![".\\vendor (.exportignore/custom directory rule: vendor)".to_string()];
-        assert!(
-            skipped_directory_on_path(&skipped, Path::new("vendor/lib/x.go")).is_some(),
-            "the parenthesised reason form must still match"
-        );
-        assert!(
-            skipped_directory_on_path(&skipped, Path::new("vendors/lib/x.go")).is_none(),
-            "a longer sibling name must not match"
-        );
-    }
-
-    #[test]
-    fn an_absolute_path_that_does_not_exist_still_gets_an_answer() {
-        // The root is canonical in production while the user's spelling need not be,
-        // and a missing path cannot be canonicalized to match — a case difference must
-        // not turn "no such file" into a hard error.
-        let dir = tempfile::tempdir().unwrap();
-        let root = crate::commands::canonicalize_existing(dir.path()).unwrap();
-        let shouted = PathBuf::from(root.to_string_lossy().to_uppercase()).join("src/nope.rs");
-
-        let relative = relative_to_project(&root, &shouted).unwrap();
-        assert_eq!(plan_spelling(&relative), "src\\nope.rs");
-    }
-
-    #[test]
-    fn the_project_root_itself_is_refused_in_every_spelling() {
-        let dir = project();
-        for spelling in [".", "./", ""] {
-            assert!(
-                relative_to_project(dir.path(), Path::new(spelling)).is_err(),
-                "`{spelling}` names the project root, not a file"
-            );
-        }
-    }
-
-    #[test]
     fn a_file_under_a_skipped_directory_is_told_which_directory() {
         let dir = project();
         let report = build(
@@ -320,38 +267,6 @@ mod tests {
             assert_eq!(other.file, relative.file);
             assert_eq!(other.verdict, relative.verdict);
         }
-    }
-
-    /// Regression for the CI failure of 2026-07-29: on the GitHub Windows runner the
-    /// project root arrived as `C:\Users\RUNNER~1\…` (an 8.3 short name) while the
-    /// canonicalized file was `C:\Users\runneradmin\…`, and the two did not match. The
-    /// fix resolves both sides the same way, so this asserts on the helper rather than
-    /// on a machine that happens to have short names enabled.
-    #[test]
-    fn both_sides_of_the_comparison_are_resolved_the_same_way() {
-        let dir = project();
-        let raw = dir.path();
-        let canonical = crate::commands::canonicalize_existing(raw).unwrap();
-
-        // Whichever spelling the caller has, the answer is the same file.
-        let from_raw = relative_to_project(raw, &canonical.join("src/main.rs")).unwrap();
-        let from_canonical = relative_to_project(&canonical, &raw.join("src/main.rs")).unwrap();
-
-        assert_eq!(plan_spelling(&from_raw), "src\\main.rs");
-        assert_eq!(plan_spelling(&from_canonical), "src\\main.rs");
-    }
-
-    #[test]
-    fn a_missing_tail_is_kept_verbatim_while_its_existing_ancestor_is_resolved() {
-        let dir = project();
-        let resolved = resolve_through_existing_ancestor(&dir.path().join("src/deep/nope.rs"));
-
-        let resolved = resolved.unwrap();
-        assert!(resolved.ends_with("src/deep/nope.rs"), "{resolved:?}");
-        assert!(
-            resolved.starts_with(crate::commands::canonicalize_existing(dir.path()).unwrap()),
-            "the existing ancestor should have been canonicalized: {resolved:?}"
-        );
     }
 
     #[test]

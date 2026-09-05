@@ -6,7 +6,7 @@
 //! its title, path, and `> **Essence.**` line instead of its full text.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Budget in KiB for the assembled file, below the 32 KiB Codex instruction limit.
 const SIZE_LIMIT_KIB: f64 = 30.0;
@@ -64,21 +64,27 @@ fn collect_modules(root: &Path) -> Result<Vec<Module>, String> {
         if !dir.is_dir() {
             return Err(format!("missing module directory: {}", dir.display()));
         }
-        let mut paths: Vec<_> = fs::read_dir(&dir)
+        // `(name, path)` rather than the path alone: the directory entry already knows
+        // the file name, so carrying it forward means the name is never an `Option` that
+        // has to be unwrapped further down.
+        let mut entries: Vec<(String, PathBuf)> = fs::read_dir(&dir)
             .map_err(|error| format!("cannot read {}: {error}", dir.display()))?
             .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
+            .map(|entry| {
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    entry.path(),
+                )
+            })
+            .filter(|(_, path)| path.extension().is_some_and(|extension| extension == "md"))
             .collect();
-        paths.sort();
-        for path in paths {
+        // Sorted by name, which is what the assembled file's order actually depends on.
+        entries.sort();
+        for (name, path) in entries {
             let body = fs::read_to_string(&path)
                 .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
             modules.push(Module {
-                relative_path: format!(
-                    ".ai/{group}/{}",
-                    path.file_name().unwrap().to_string_lossy()
-                ),
+                relative_path: format!(".ai/{group}/{name}"),
                 body: body.trim().to_string(),
             });
         }
