@@ -53,6 +53,20 @@ pub enum ArchiveError {
     #[error("unsafe archive member path: {member}")]
     UnsafeMemberPath { member: String },
 
+    /// The archive expands past what a caller allowed. A distinct variant, and one that
+    /// names the ceiling: a refusal a user cannot act on is barely better than the
+    /// failure it prevented.
+    #[error(
+        "{archive} expands past the {limit} limit of {allowed}; extraction stopped. \
+         A bundle this large is either not a codepack bundle or is deliberately \
+         oversized."
+    )]
+    ExtractionTooLarge {
+        archive: PathBuf,
+        limit: &'static str,
+        allowed: String,
+    },
+
     /// The caller cancelled mid-archive. A distinct variant rather than a generic
     /// failure because the caller must be able to tell "you stopped this" from
     /// "something broke", and report it as neither an error nor a success.

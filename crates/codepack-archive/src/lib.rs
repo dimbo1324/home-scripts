@@ -38,6 +38,6 @@ pub use pack::{PackResult, pack_files};
 pub use plan::{ArchivePartPlan, ArchivePlan, plan_archive, predicted_result_for_plan};
 pub use report::write_archive_plan_report;
 pub use restore::{
-    extract_zip_safely, list_zip_entries, read_zip_entry_to_string, restore_archive_set,
-    safe_member_target,
+    ExtractLimits, extract_zip_safely, extract_zip_with_limits, list_zip_entries,
+    read_zip_entry_to_string, restore_archive_set, safe_member_target,
 };

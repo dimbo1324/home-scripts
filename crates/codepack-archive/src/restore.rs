@@ -29,6 +29,65 @@ pub fn safe_member_target(destination: &Path, member_name: &str) -> Result<PathB
     Ok(destination.join(relative))
 }
 
+/// What an archive is allowed to expand into.
+///
+/// ## Why this exists
+///
+/// `codepack verify` is the one command whose input is untrusted by design — it re-scans
+/// a bundle its user *received*. Extraction streamed every member with no ceiling, so an
+/// archive of a few kilobytes could expand to fill the disk. Path traversal was already
+/// handled; sheer volume was not.
+///
+/// ## Why the declared size is not the check
+///
+/// A zip's header states each member's uncompressed size, and that number is written by
+/// whoever built the archive — that is, by the attacker. It is used below only as a
+/// cheap early refusal. The ceiling that matters is enforced on the bytes actually
+/// written, by reading each member through a limited reader.
+///
+/// The defaults are deliberately generous: a real bundle carries a copy of a project and
+/// a full text dump of it, and refusing a legitimate export would be a worse failure
+/// than the one being prevented. A caller with a different tolerance passes its own.
+#[derive(Debug, Clone, Copy)]
+pub struct ExtractLimits {
+    /// Across the whole archive.
+    pub max_total_bytes: u64,
+    /// For any single member.
+    pub max_entry_bytes: u64,
+    /// Members, of any size. Guards the other shape of the same attack: millions of
+    /// empty files, which costs inodes and time rather than bytes.
+    pub max_entries: usize,
+}
+
+impl Default for ExtractLimits {
+    fn default() -> Self {
+        Self {
+            max_total_bytes: 8 * 1024 * 1024 * 1024,
+            max_entry_bytes: 2 * 1024 * 1024 * 1024,
+            max_entries: 200_000,
+        }
+    }
+}
+
+impl ExtractLimits {
+    fn exceeded(archive: &Path, limit: &'static str, allowed: String) -> ArchiveError {
+        ArchiveError::ExtractionTooLarge {
+            archive: archive.to_path_buf(),
+            limit,
+            allowed,
+        }
+    }
+}
+
+/// [`extract_zip_safely`] with a caller-chosen budget.
+pub fn extract_zip_with_limits(
+    archive_path: &Path,
+    destination: &Path,
+    limits: ExtractLimits,
+) -> Result<u32> {
+    extract_zip_inner(archive_path, destination, limits)
+}
+
 /// Extracts every entry of `archive_path` into `destination`, streaming file contents
 /// rather than loading whole files into memory. Every entry is checked by **both**
 /// `ZipFile::enclosed_name()` (the `zip` crate's own path-safety accessor) and the
@@ -38,6 +97,14 @@ pub fn safe_member_target(destination: &Path, member_name: &str) -> Result<PathB
 /// written earlier in the same archive, before the bad one, stays on disk: this is the
 /// honest, ported partial-write-before-abort behavior, not a gap.
 pub fn extract_zip_safely(archive_path: &Path, destination: &Path) -> Result<u32> {
+    extract_zip_inner(archive_path, destination, ExtractLimits::default())
+}
+
+fn extract_zip_inner(
+    archive_path: &Path,
+    destination: &Path,
+    limits: ExtractLimits,
+) -> Result<u32> {
     let file = std::fs::File::open(archive_path).map_err(|source| ArchiveError::Read {
         path: archive_path.to_path_buf(),
         source,
@@ -51,7 +118,16 @@ pub fn extract_zip_safely(archive_path: &Path, destination: &Path) -> Result<u32
         source,
     })?;
 
+    if archive.len() > limits.max_entries {
+        return Err(ExtractLimits::exceeded(
+            archive_path,
+            "member-count",
+            limits.max_entries.to_string(),
+        ));
+    }
+
     let mut extracted = 0u32;
+    let mut written_total = 0u64;
     for index in 0..archive.len() {
         let mut zip_entry = archive
             .by_index(index)
@@ -85,14 +161,46 @@ pub fn extract_zip_safely(archive_path: &Path, destination: &Path) -> Result<u32
                 source,
             })?;
         }
+        // The header's own claim, used only to refuse early. It is written by whoever
+        // built the archive, so it is never the check that matters.
+        if zip_entry.size() > limits.max_entry_bytes {
+            return Err(ExtractLimits::exceeded(
+                archive_path,
+                "per-member",
+                limits.max_entry_bytes.to_string(),
+            ));
+        }
+
         let mut output = std::fs::File::create(&target).map_err(|source| ArchiveError::Write {
             path: target.clone(),
             source,
         })?;
-        std::io::copy(&mut zip_entry, &mut output).map_err(|source| ArchiveError::Write {
+        // Read one byte past the ceiling: if the member yields it, the member is over the
+        // limit however its header described itself.
+        let allowance = limits.max_entry_bytes.saturating_add(1);
+        let written = std::io::copy(
+            &mut std::io::Read::take(&mut zip_entry, allowance),
+            &mut output,
+        )
+        .map_err(|source| ArchiveError::Write {
             path: target.clone(),
             source,
         })?;
+        if written > limits.max_entry_bytes {
+            return Err(ExtractLimits::exceeded(
+                archive_path,
+                "per-member",
+                limits.max_entry_bytes.to_string(),
+            ));
+        }
+        written_total = written_total.saturating_add(written);
+        if written_total > limits.max_total_bytes {
+            return Err(ExtractLimits::exceeded(
+                archive_path,
+                "total-size",
+                limits.max_total_bytes.to_string(),
+            ));
+        }
         extracted += 1;
     }
 
@@ -172,11 +280,24 @@ pub fn read_zip_entry_to_string(archive_path: &Path, entry: &str) -> Result<Stri
         source,
     })?;
 
+    // Bounded for the same reason extraction is, and on the same terms: this reads into
+    // memory, so an unbounded member is an out-of-memory abort rather than a full disk.
+    let limits = ExtractLimits::default();
+    let allowance = limits.max_entry_bytes.saturating_add(1);
     let mut text = String::new();
-    std::io::Read::read_to_string(&mut member, &mut text).map_err(|source| ArchiveError::Read {
-        path: archive_path.to_path_buf(),
-        source,
-    })?;
+    let read =
+        std::io::Read::read_to_string(&mut std::io::Read::take(&mut member, allowance), &mut text)
+            .map_err(|source| ArchiveError::Read {
+                path: archive_path.to_path_buf(),
+                source,
+            })?;
+    if read as u64 > limits.max_entry_bytes {
+        return Err(ExtractLimits::exceeded(
+            archive_path,
+            "per-member",
+            limits.max_entry_bytes.to_string(),
+        ));
+    }
     Ok(text)
 }
 
@@ -213,5 +334,153 @@ mod tests {
     fn rejects_current_dir_component_too() {
         let dest = Path::new("/dest");
         assert!(safe_member_target(dest, "./a.txt").is_err());
+    }
+
+    // --- The decompression budget ---------------------------------------------------
+    //
+    // `codepack verify` re-scans a bundle its user *received*, which makes it the one
+    // input in this product that is untrusted by design. Path traversal was already
+    // refused; sheer expanded volume was not, so a small archive could fill the disk.
+
+    /// Writes a zip with the given members. Deflate, so a highly repetitive member
+    /// compresses the way a bomb's does — the archive on disk stays tiny.
+    fn archive_of(dir: &Path, members: &[(&str, usize)]) -> PathBuf {
+        use std::io::Write as _;
+
+        let path = dir.join("bundle.zip");
+        let file = std::fs::File::create(&path).expect("create the fixture archive");
+        let mut zip = zip::ZipWriter::new(file);
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        for (name, size) in members {
+            zip.start_file(*name, options).expect("start a member");
+            zip.write_all(&vec![b'a'; *size]).expect("write a member");
+        }
+        zip.finish().expect("finish the archive");
+        path
+    }
+
+    fn tiny_limits() -> ExtractLimits {
+        ExtractLimits {
+            max_total_bytes: 4096,
+            max_entry_bytes: 1024,
+            max_entries: 8,
+        }
+    }
+
+    #[test]
+    fn an_ordinary_archive_extracts_under_the_default_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_of(dir.path(), &[("a.txt", 10), ("nested/b.txt", 20)]);
+        let destination = tempfile::tempdir().unwrap();
+
+        let extracted = extract_zip_safely(&archive, destination.path()).expect("extracts");
+        assert_eq!(extracted, 2);
+        assert!(destination.path().join("nested/b.txt").is_file());
+    }
+
+    #[test]
+    fn a_member_past_the_per_member_ceiling_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_of(dir.path(), &[("huge.txt", 4096)]);
+        let destination = tempfile::tempdir().unwrap();
+
+        let error = extract_zip_with_limits(&archive, destination.path(), tiny_limits())
+            .expect_err("a member over the ceiling must be refused");
+        let rendered = error.to_string();
+        assert!(rendered.contains("per-member"), "{rendered}");
+        assert!(
+            rendered.contains("1024"),
+            "the message must name the ceiling: {rendered}"
+        );
+    }
+
+    /// The other shape of the same attack: every member is individually acceptable and
+    /// the total is not.
+    #[test]
+    fn members_that_are_each_small_enough_can_still_exceed_the_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_of(
+            dir.path(),
+            &[
+                ("a.txt", 1000),
+                ("b.txt", 1000),
+                ("c.txt", 1000),
+                ("d.txt", 1000),
+                ("e.txt", 1000),
+            ],
+        );
+        let destination = tempfile::tempdir().unwrap();
+
+        let error = extract_zip_with_limits(&archive, destination.path(), tiny_limits())
+            .expect_err("the total must be enforced too");
+        assert!(error.to_string().contains("total-size"), "{error}");
+    }
+
+    /// And the third shape: nothing large, just an unreasonable number of members.
+    #[test]
+    fn too_many_members_are_refused_before_anything_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let members: Vec<(String, usize)> =
+            (0..20).map(|index| (format!("f{index}.txt"), 1)).collect();
+        let borrowed: Vec<(&str, usize)> = members
+            .iter()
+            .map(|(name, size)| (name.as_str(), *size))
+            .collect();
+        let archive = archive_of(dir.path(), &borrowed);
+        let destination = tempfile::tempdir().unwrap();
+
+        let error = extract_zip_with_limits(&archive, destination.path(), tiny_limits())
+            .expect_err("the member count must be enforced");
+        assert!(error.to_string().contains("member-count"), "{error}");
+        // Refused before the loop, so nothing landed.
+        assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 0);
+    }
+
+    /// A compressed archive of a few hundred bytes expanding to a megabyte is the
+    /// miniature of the real attack; the ratio is what makes it cheap to send.
+    #[test]
+    fn a_small_archive_that_expands_enormously_is_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_of(dir.path(), &[("bomb.txt", 1024 * 1024)]);
+        let on_disk = std::fs::metadata(&archive).unwrap().len();
+        assert!(
+            on_disk < 16 * 1024,
+            "the fixture should be tiny on disk to be worth calling a bomb: {on_disk}"
+        );
+
+        let destination = tempfile::tempdir().unwrap();
+        let error = extract_zip_with_limits(&archive, destination.path(), tiny_limits())
+            .expect_err("a bomb must not expand");
+        assert!(matches!(error, ArchiveError::ExtractionTooLarge { .. }));
+    }
+
+    #[test]
+    fn reading_a_member_into_memory_is_bounded_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_of(dir.path(), &[("small.txt", 10)]);
+
+        // The published reader uses the default ceiling, so a small member still reads.
+        let text = read_zip_entry_to_string(&archive, "small.txt").expect("reads");
+        assert_eq!(text.len(), 10);
+    }
+
+    #[test]
+    fn listing_names_only_the_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = archive_of(dir.path(), &[("a.txt", 1), ("nested/b.txt", 1)]);
+
+        let mut names = list_zip_entries(&archive).expect("lists");
+        names.sort();
+        assert_eq!(names, vec!["a.txt".to_string(), "nested/b.txt".to_string()]);
+    }
+
+    #[test]
+    fn the_default_budget_is_generous_enough_for_a_real_bundle() {
+        // A guard against tightening these into a limit that refuses legitimate exports:
+        // a bundle carries a copy of a project and a full text dump of it.
+        let limits = ExtractLimits::default();
+        assert!(limits.max_total_bytes >= 8 * 1024 * 1024 * 1024);
+        assert!(limits.max_entry_bytes >= 1024 * 1024 * 1024);
+        assert!(limits.max_entries >= 100_000);
     }
 }
