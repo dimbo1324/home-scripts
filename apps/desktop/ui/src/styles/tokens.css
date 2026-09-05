@@ -79,6 +79,15 @@
   --z-toast: 100;
 }
 
+/* The light palette is also the bare `:root` default, and that is not a stylistic
+   choice. `data-theme` is stamped by `initTheme`, which runs *after* settings load — so
+   until then, and forever if loading fails, a palette defined only under
+   `[data-theme=...]` leaves every token undefined. The startup-failure screen rendered
+   in browser defaults because of it: near-black text on a near-black page, which is the
+   one screen that has to be readable. Defining the light values here means tokens exist
+   from the first paint; the selector below is kept so the explicit choice still reads
+   as one. */
+:root,
 :root[data-theme="light"] {
   color-scheme: light;
 

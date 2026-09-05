@@ -205,6 +205,12 @@
   .shell__content {
     flex: 1;
     overflow: auto;
+    /* The scrollbar's width is reserved whether or not it is showing, so filtering a
+       long list does not shift the page sideways under the pointer. */
+    scrollbar-gutter: stable;
+    /* A pane that has hit its end stops there rather than passing the scroll to the
+       shell behind it. */
+    overscroll-behavior: contain;
     padding: var(--space-8) var(--space-8) var(--space-10);
   }
 

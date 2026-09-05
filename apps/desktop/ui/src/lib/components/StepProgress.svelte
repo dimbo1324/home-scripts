@@ -65,7 +65,7 @@
             {ordinal}
           {/if}
         </span>
-        <span class="step__label">{label(ordinal)}</span>
+        <span class="step__label" title={label(ordinal)}>{label(ordinal)}</span>
       </li>
     {/each}
   </ol>

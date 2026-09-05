@@ -19,7 +19,9 @@
 <div class="stat stat--{tone}">
   <div class="stat__head">
     {#if icon}<span class="stat__icon"><Icon name={icon} size={14} /></span>{/if}
-    <span class="stat__label">{label}</span>
+    <!-- The label ellipsises when the column is narrow, and a Russian label is often
+         the one that does; the tooltip is the only way to read it then. -->
+    <span class="stat__label" title={label}>{label}</span>
   </div>
   <div class="stat__value num">{value}</div>
   {#if hint}<div class="stat__hint">{hint}</div>{/if}

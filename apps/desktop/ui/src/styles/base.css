@@ -67,6 +67,15 @@ h4 {
   font-family: var(--font-display);
   font-weight: var(--weight-semibold);
   line-height: var(--leading-tight);
+  /* Spreads a two-line heading evenly instead of leaving one word alone on the second
+     line. Ignored by engines that do not know it, which costs nothing. */
+  text-wrap: balance;
+}
+
+p {
+  /* The same idea for prose, minus the cost: `pretty` only fixes the last line, so it
+     stays cheap on the long explanatory paragraphs this interface is full of. */
+  text-wrap: pretty;
 }
 
 ul,
@@ -114,6 +123,22 @@ textarea {
   margin: 0;
 }
 
+/* Checkboxes, radios, range thumbs and the text caret are drawn by the engine, not by
+   this stylesheet — without these two they stay the browser's default blue while
+   everything around them is the app's accent, and the mismatch is most obvious in dark
+   mode. Both are theme-aware for free, since they read the same token. */
+input,
+select,
+textarea,
+progress {
+  accent-color: var(--accent);
+}
+
+input,
+textarea {
+  caret-color: var(--accent);
+}
+
 button {
   background: none;
   border: 0;
@@ -140,6 +165,14 @@ button:disabled {
 ::selection {
   background: var(--accent-soft);
   color: var(--fg);
+}
+
+/* WebView2 on Windows honours the `-webkit-` rules below; the two standard properties
+   are what WebKitGTK and Gecko read, and they matter the day macOS and Linux come back
+   (BLUEPRINT §B.4). Two lines now against a differently-coloured scrollbar later. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
 }
 
 ::-webkit-scrollbar {
