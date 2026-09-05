@@ -105,7 +105,9 @@ pub use policy::{
     SafetyDecision, SecurityOptions, classify_sensitive_file, is_env_example, normalise_mode,
     should_skip_file_for_safety,
 };
-pub use pseudonym::REDACTION_PLACEHOLDER_PREFIXES;
+pub use pseudonym::{
+    PlaceholderKind, REDACTION_PLACEHOLDER_PREFIXES, parse_placeholder, placeholder_spans,
+};
 pub use redact::{redact_secrets, redact_shell_command};
 pub use scan::{
     Finding, FindingKind, ScanOptions, ScanResult, ScanSummary, result_from_findings, scan_project,

@@ -191,24 +191,11 @@ pub(super) fn collect_secret_hits(line: &str, strict_checksums: bool) -> Vec<Sec
 
 /// Where this crate's own redaction placeholders sit in `line`.
 ///
-/// A placeholder runs from one of the known prefixes to the `>` that closes it. An
-/// unterminated one — text that merely begins like a placeholder — is not treated as
-/// one, so a line that genuinely contains `<REDACTED:` as content is still scanned.
+/// Delegated to the module that writes them, so recognition cannot drift from
+/// production. It used to match a known prefix and then take the next `>`, which reads
+/// `<REDACTED>secret>` as one placeholder covering the secret.
 fn placeholder_spans(line: &str) -> Vec<(usize, usize)> {
-    let mut spans = Vec::new();
-    for prefix in crate::pseudonym::REDACTION_PLACEHOLDER_PREFIXES {
-        let mut from = 0usize;
-        while let Some(at) = line[from..].find(prefix) {
-            let start = from + at;
-            let end = match line[start..].find('>') {
-                Some(offset) => start + offset + 1,
-                None => break,
-            };
-            spans.push((start, end));
-            from = end;
-        }
-    }
-    spans
+    crate::pseudonym::placeholder_spans(line)
 }
 
 /// Invariant I3 (`.ai/project/12-domain-rules.md`): a `Finding.message` must never

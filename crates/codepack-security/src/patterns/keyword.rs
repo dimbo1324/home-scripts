@@ -127,7 +127,7 @@ pub(crate) fn redacted_line_with(line: &str, placeholders: Placeholders<'_>) -> 
             // whole line collapses rather than leaking an unidentifiable fragment. Never
             // labelled: the "secret" here is a whole line of source, so a label would
             // claim two lines are the same credential when all they share is their text.
-            || "<REDACTED_SECRET_LINE>".to_string(),
+            crate::pseudonym::line_placeholder,
             placeholders,
         );
     }

@@ -321,14 +321,25 @@ fn kind_label(kind: FindingKind) -> &'static str {
     }
 }
 
-/// Codepack's own redaction placeholders. Any of these in a line means that position
-/// was already redacted before the bundle was written.
+/// Removes codepack's own redaction placeholders from `line`, leaving what redaction
+/// did not put there.
 ///
-/// Taken from `codepack-security` rather than restated, because a labelled bundle spells
-/// them `<REDACTED:s1>`: a copy of this list that knew only the plain shapes would read
-/// every label as a leftover credential and call a clean bundle dirty.
-fn redaction_placeholders() -> &'static [&'static str] {
-    codepack_security::REDACTION_PLACEHOLDER_PREFIXES
+/// The spans come from `codepack-security`, which writes them, rather than from a list
+/// restated here: a labelled bundle spells them `<REDACTED:s1>`, and a copy that knew
+/// only the plain shapes would read every label as a leftover credential and call a
+/// clean bundle dirty. Since audit No. 7 the match is exact, so a crafted
+/// `<REDACTED>real-secret-value>` no longer disappears wholesale from the residue — the
+/// value stays, and `verify` gets to judge it.
+fn without_placeholders(line: &str) -> String {
+    let mut residue = String::with_capacity(line.len());
+    let mut cursor = 0usize;
+    for (start, end) in codepack_security::placeholder_spans(line) {
+        residue.push_str(&line[cursor..start]);
+        residue.push(' ');
+        cursor = end;
+    }
+    residue.push_str(&line[cursor..]);
+    residue
 }
 
 /// The shortest run of alphanumerics `verify` still treats as possibly-a-secret once
@@ -359,16 +370,10 @@ const RESIDUAL_SECRET_MIN_RUN: usize = 12;
 /// long run either and is dismissed here. Telling that apart from an ordinary word by
 /// shape alone is not possible, and the project already records that trade-off.
 fn is_not_credential_shaped(raw_line: &str) -> bool {
-    let mut residue = raw_line.to_string();
-    for placeholder in redaction_placeholders() {
-        residue = residue.replace(placeholder, " ");
-    }
-    // A label's own suffix (`s1>`) is what a prefix-only match leaves behind. Removing
-    // the digits and the closing bracket keeps the residue free of text redaction
-    // itself introduced; it is far too short to reach the run threshold either way, but
-    // leaving it would make the residue depend on how many secrets a bundle happened to
-    // have.
-    residue = residue.replace(['>'], " ");
+    // Whole placeholders come out, labels and all, so nothing redaction introduced can
+    // be mistaken for a leftover. `>` is not alphanumeric, so whatever is left of an
+    // unrecognised bracket breaks a run rather than extending one.
+    let residue = without_placeholders(raw_line);
 
     let mut run = 0usize;
     for character in residue.chars() {

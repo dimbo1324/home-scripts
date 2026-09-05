@@ -85,6 +85,100 @@ fn normalise(secret: &str) -> String {
     unquoted.to_string()
 }
 
+/// Which of the three replacement roles a placeholder plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaceholderKind {
+    /// The value after a key: `API_KEY=<REDACTED>`.
+    Value,
+    /// A span with no key of its own — a bare token, a provider signature.
+    Bare,
+    /// A whole collapsed line, produced by `keyword::redacted_line_with`. Never
+    /// labelled: the "secret" is a line of source, and a label would claim two lines are
+    /// the same credential when all they share is their text.
+    Line,
+}
+
+/// Spells one placeholder. **The only place a placeholder is written.**
+///
+/// Paired with [`parse_placeholder`] and pinned to it by a round-trip test, so what this
+/// module produces and what it recognises cannot drift apart.
+fn render(kind: PlaceholderKind, label: Option<usize>) -> String {
+    match (kind, label) {
+        (PlaceholderKind::Value, None) => "<REDACTED>".to_string(),
+        (PlaceholderKind::Value, Some(n)) => format!("<REDACTED:s{n}>"),
+        (PlaceholderKind::Bare, None) => "<REDACTED_SECRET>".to_string(),
+        (PlaceholderKind::Bare, Some(n)) => format!("<REDACTED_SECRET:s{n}>"),
+        // A labelled line form does not exist; asking for one is a caller's mistake, and
+        // answering with the unlabelled spelling is the safe reading of it.
+        (PlaceholderKind::Line, _) => "<REDACTED_SECRET_LINE>".to_string(),
+    }
+}
+
+/// The placeholder `text` is, **exactly**, or `None`.
+///
+/// Exact rather than "starts with a known prefix and ends with `>`". That heuristic
+/// accepted `<REDACTED>real-secret-value>` as an already-redacted value and returned it
+/// verbatim — the one function that decides "this is already safe" failing towards
+/// *skip*, in the component that is invariant I3's last line of defence. File content is
+/// untrusted input to the redactor: it is data, not something the product wrote.
+pub fn parse_placeholder(text: &str) -> Option<(PlaceholderKind, Option<usize>)> {
+    let labelled = |body: &str| -> Option<usize> {
+        // `sN`, N a run of digits and nothing else. `s1x`, `s`, `s01`-with-a-space and
+        // an empty label all fail here rather than being waved through.
+        let digits = body.strip_prefix('s')?;
+        (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| digits.parse().ok())
+            .flatten()
+    };
+
+    let inner = text.strip_prefix('<')?.strip_suffix('>')?;
+    match inner {
+        "REDACTED" => Some((PlaceholderKind::Value, None)),
+        "REDACTED_SECRET" => Some((PlaceholderKind::Bare, None)),
+        "REDACTED_SECRET_LINE" => Some((PlaceholderKind::Line, None)),
+        _ => {
+            // The bare prefix is tried first: `REDACTED_SECRET:s1` also starts with
+            // `REDACTED`, but not with `REDACTED:`, so the two cannot be confused.
+            if let Some(body) = inner.strip_prefix("REDACTED_SECRET:") {
+                labelled(body).map(|n| (PlaceholderKind::Bare, Some(n)))
+            } else if let Some(body) = inner.strip_prefix("REDACTED:") {
+                labelled(body).map(|n| (PlaceholderKind::Value, Some(n)))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Where this module's placeholders sit in `line`, as byte ranges.
+///
+/// Lives beside the renderer for the reason above: a consumer that scans for them with
+/// its own idea of their shape is a second, unpinned definition. A run that merely
+/// *starts* like a placeholder is not one, so a line genuinely discussing `<REDACTED:`
+/// as text is still scanned.
+pub fn placeholder_spans(line: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut from = 0usize;
+    while let Some(offset) = line[from..].find('<') {
+        let start = from + offset;
+        // A placeholder cannot contain `>`, so the first one after `<` is the only
+        // candidate end. Anything else is not a placeholder however it continues.
+        match line[start..].find('>') {
+            Some(close) => {
+                let end = start + close + 1;
+                if parse_placeholder(&line[start..end]).is_some() {
+                    spans.push((start, end));
+                    from = end;
+                } else {
+                    from = start + 1;
+                }
+            }
+            None => break,
+        }
+    }
+    spans
+}
+
 /// The placeholder `secret` already is, if it is one.
 ///
 /// **Redacting a placeholder yields that same placeholder.** Without this, a second
@@ -99,11 +193,16 @@ fn normalise(secret: &str) -> String {
 /// idempotent fixes every one of them at once, including the next one somebody adds.
 fn existing_placeholder(secret: &str) -> Option<String> {
     let candidate = normalise(secret);
-    let looks_like = REDACTION_PLACEHOLDER_PREFIXES
-        .iter()
-        .any(|prefix| candidate.starts_with(prefix))
-        && candidate.ends_with('>');
-    looks_like.then_some(candidate)
+    parse_placeholder(&candidate).map(|_| candidate)
+}
+
+/// The whole-line placeholder, for `keyword::redacted_line_with`'s collapse case.
+///
+/// A function rather than a literal at the call site: every placeholder in the product
+/// is spelled by [`render`], so there is exactly one definition to keep in step with
+/// [`parse_placeholder`].
+pub(crate) fn line_placeholder() -> String {
+    render(PlaceholderKind::Line, None)
 }
 
 /// How a redaction site spells its replacement.
@@ -133,10 +232,7 @@ impl<'a> Placeholders<'a> {
         if let Some(existing) = existing_placeholder(secret) {
             return existing;
         }
-        match self.labels {
-            Some(labels) => format!("<REDACTED:s{}>", labels.label(secret)),
-            None => "<REDACTED>".to_string(),
-        }
+        render(PlaceholderKind::Value, self.labels.map(|l| l.label(secret)))
     }
 
     /// Replacement for a span with no key of its own — a bare token, a provider
@@ -145,19 +241,17 @@ impl<'a> Placeholders<'a> {
         if let Some(existing) = existing_placeholder(secret) {
             return existing;
         }
-        match self.labels {
-            Some(labels) => format!("<REDACTED_SECRET:s{}>", labels.label(secret)),
-            None => "<REDACTED_SECRET>".to_string(),
-        }
+        render(PlaceholderKind::Bare, self.labels.map(|l| l.label(secret)))
     }
 }
 
 /// Every placeholder shape redaction can produce, as literal prefixes.
 ///
-/// Exported because consumers have to recognise them: `verify` strips them before
-/// asking whether anything credential-shaped is left, and the text dump counts them.
-/// A consumer matching on `"<REDACTED>"` alone would silently stop recognising a
-/// labelled bundle.
+/// A *prefix* list answers "does this line contain redaction at all", which is all the
+/// text dump's counter needs. It is not a way to decide whether a given value **is** a
+/// placeholder — that question is [`parse_placeholder`], and answering it by prefix is
+/// what audit No. 7 found: `<REDACTED>real-secret-value>` passed. A round-trip test pins
+/// this list to what [`render`] actually emits.
 pub const REDACTION_PLACEHOLDER_PREFIXES: &[&str] = &[
     "<REDACTED_SECRET_LINE>",
     "<REDACTED_SECRET:",
@@ -169,6 +263,157 @@ pub const REDACTION_PLACEHOLDER_PREFIXES: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Recognition is exact, and pinned to production -------------------------------
+    //
+    // Audit No. 7: `existing_placeholder` matched a known prefix and a closing `>`, so
+    // `<REDACTED>real-secret-value>` was accepted as "already redacted" and returned
+    // verbatim. The one function that decides a value is already safe failed towards
+    // skip, in the component invariant I3 rests on.
+
+    /// Every shape `render` can produce is recognised by `parse_placeholder`, and comes
+    /// back as the same kind and label. This is what keeps the writer and the reader
+    /// from drifting apart.
+    #[test]
+    fn every_rendered_placeholder_parses_back_to_itself() {
+        let kinds = [
+            PlaceholderKind::Value,
+            PlaceholderKind::Bare,
+            PlaceholderKind::Line,
+        ];
+        for kind in kinds {
+            for label in [None, Some(1), Some(7), Some(1234)] {
+                let text = render(kind, label);
+                let (parsed_kind, parsed_label) = parse_placeholder(&text)
+                    .unwrap_or_else(|| panic!("{text} is produced but not recognised"));
+                assert_eq!(parsed_kind, kind, "{text}");
+                // The line form has no labelled spelling, so it renders unlabelled
+                // whatever it is asked for — and must parse back that way too.
+                let expected = if kind == PlaceholderKind::Line {
+                    None
+                } else {
+                    label
+                };
+                assert_eq!(parsed_label, expected, "{text}");
+            }
+        }
+    }
+
+    /// The prefix list is a "does this line contain redaction" filter, not a recogniser.
+    /// It still has to describe what is actually written, or the text dump's counter
+    /// stops seeing a shape.
+    #[test]
+    fn the_prefix_list_covers_every_shape_that_is_produced() {
+        for kind in [
+            PlaceholderKind::Value,
+            PlaceholderKind::Bare,
+            PlaceholderKind::Line,
+        ] {
+            for label in [None, Some(3)] {
+                let text = render(kind, label);
+                assert!(
+                    REDACTION_PLACEHOLDER_PREFIXES
+                        .iter()
+                        .any(|prefix| text.starts_with(prefix)),
+                    "{text} is produced but no prefix matches it"
+                );
+            }
+        }
+    }
+
+    /// The exact case the audit names: a secret wrapped to look like a placeholder must
+    /// be redacted, not returned.
+    #[test]
+    fn a_secret_wrapped_to_look_like_a_placeholder_is_still_redacted() {
+        let labels = Labels::default();
+        let placeholders = Placeholders::labelled(&labels);
+
+        for crafted in [
+            "<REDACTED>real-secret-value>",
+            "<REDACTED:s1>real-secret-value>",
+            "<REDACTED_SECRET>AKIAIOSFODNN7EXAMPLE>",
+            "<REDACTED:>",
+            "<REDACTED:sx>",
+            "<REDACTED:s1x>",
+            "<REDACTED_SECRET_LINE:s1>",
+            "<REDACTEDsomething>",
+        ] {
+            let answer = placeholders.value(crafted);
+            assert_ne!(
+                answer, crafted,
+                "{crafted} was passed through as if it were already redacted"
+            );
+            assert!(
+                parse_placeholder(&answer).is_some(),
+                "{crafted} produced {answer}, which is not a placeholder"
+            );
+        }
+    }
+
+    /// The general form of the rule, over a spread of placeholder-shaped inputs rather
+    /// than one example: whatever comes in, what comes out is **always exactly a
+    /// placeholder**. That is the property worth stating, and it is strictly stronger
+    /// than "the secret is not in the output" — a placeholder cannot carry anything,
+    /// because its whole grammar is `<REDACTED>`, `<REDACTED:sN>` and their two bare
+    /// siblings, with no room for a payload.
+    ///
+    /// A value that *is* already a placeholder comes back as itself, which is the
+    /// idempotence the two-pass design needs.
+    #[test]
+    fn every_answer_is_exactly_a_placeholder_whatever_went_in() {
+        let labels = Labels::default();
+        let placeholders = Placeholders::labelled(&labels);
+
+        let fragments = [
+            "",
+            "<",
+            ">",
+            "REDACTED",
+            ":s1",
+            "secret-value",
+            " ",
+            "_SECRET",
+        ];
+        for a in fragments {
+            for b in fragments {
+                for c in fragments {
+                    let candidate = format!("<REDACTED{a}{b}{c}>");
+                    for answer in [
+                        placeholders.value(&candidate),
+                        placeholders.bare(&candidate),
+                    ] {
+                        assert!(
+                            parse_placeholder(&answer).is_some(),
+                            "{candidate} produced {answer}, which is not a placeholder"
+                        );
+                        if parse_placeholder(&normalise(&candidate)).is_some() {
+                            assert_eq!(answer, normalise(&candidate), "{candidate}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Spans are found by the same exact rule, so a crafted wrapper cannot make a
+    /// consumer skip over the secret inside it.
+    #[test]
+    fn spans_cover_real_placeholders_and_not_crafted_ones() {
+        let line = "a=<REDACTED:s1> b=<REDACTED>oops> c=<REDACTED_SECRET_LINE>";
+        let spans = placeholder_spans(line);
+        let found: Vec<&str> = spans.iter().map(|(s, e)| &line[*s..*e]).collect();
+        assert_eq!(
+            found,
+            vec!["<REDACTED:s1>", "<REDACTED>", "<REDACTED_SECRET_LINE>"],
+            "the crafted wrapper must not swallow `oops>`"
+        );
+    }
+
+    #[test]
+    fn an_unterminated_run_produces_no_span() {
+        assert!(placeholder_spans("<REDACTED:s1 never closed").is_empty());
+        assert!(placeholder_spans("prose about <REDACTED: markers").is_empty());
+    }
 
     #[test]
     fn the_same_secret_gets_the_same_label_and_a_different_one_does_not() {
