@@ -25,11 +25,15 @@ const MAX_LISTED_PATHS = 20;
 export function formatWatchSummary(
   changedPaths: readonly string[],
   projectRoot: string | null,
+  truncated = false,
 ): string {
+  // `+` rather than an exact figure: past the backend's cap the count is a floor, and
+  // pasting a precise-looking number that is not precise is worse than saying so.
+  const count = truncated ? `${changedPaths.length}+` : `${changedPaths.length}`;
   const heading =
     projectRoot === null || projectRoot === ""
-      ? `${changedPaths.length} file(s) changed`
-      : `${changedPaths.length} file(s) changed in ${projectRoot}`;
+      ? `${count} file(s) changed`
+      : `${count} file(s) changed in ${projectRoot}`;
 
   if (changedPaths.length === 0) {
     return heading;

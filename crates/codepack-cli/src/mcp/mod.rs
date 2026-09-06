@@ -60,13 +60,28 @@ use crate::exit::Outcome;
 /// exit and not an error. A server that treated it as one would make every clean
 /// disconnect look like a crash in the client's logs.
 pub(crate) fn run() -> Result<Outcome> {
-    // A `BufReader` over `Stdin` rather than `stdin().lock()`: the reader runs on its
-    // own thread now, and a `StdinLock` holds a mutex guard that cannot cross one.
-    let mut stdin = std::io::BufReader::new(std::io::stdin());
+    // The reader thread is **detached**, not scoped. `serve` uses `thread::scope`, which
+    // must join the reader before it can return — and the reader is blocked in
+    // `read_line` until stdin closes. So a session that ended because *stdout* broke (a
+    // client that stopped listening) left the process alive, holding its stdio and its
+    // temporary directories, while the client believed it had gone away (audit No. 18).
+    //
+    // Nothing is lost by not joining: the thread owns its own stdin handle and does
+    // nothing but forward lines, so the process exiting is a complete and correct end for
+    // it. `serve` keeps the scoped form because a test drives it with a finite input,
+    // where the join always returns.
+    //
+    // A `BufReader` over `Stdin` rather than `stdin().lock()`: a `StdinLock` holds a
+    // mutex guard that cannot cross a thread boundary.
+    let (sender, receiver) = std::sync::mpsc::channel::<std::io::Result<String>>();
+    std::thread::spawn(move || {
+        forward_lines(&mut std::io::BufReader::new(std::io::stdin()), &sender);
+    });
+
     let mut stdout = std::io::stdout();
     // A broken pipe is how a client that has stopped listening looks from here, and it
     // is a normal end of session rather than a failure to report to nobody.
-    match serve(&mut stdin, &mut stdout) {
+    match session(&mut Incoming::new(&receiver), &mut stdout) {
         Ok(()) => Ok(Outcome::Success),
         Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(Outcome::Success),
         Err(error) => Err(crate::error::CliError::message(format!(
@@ -77,6 +92,11 @@ pub(crate) fn run() -> Result<Outcome> {
 
 /// The read/dispatch/write loop, over any pair of streams so it can be driven by a test
 /// without a process.
+///
+/// Test-only since audit No. 18: the real session runs from [`run`], which detaches its
+/// reader instead of scoping it. A scope must join, and joining a thread blocked in
+/// `read_line` is what kept a process alive after its stdout had gone. A test's input is
+/// finite, so the join always returns there.
 ///
 /// ## Why there is a second thread
 ///
@@ -89,31 +109,39 @@ pub(crate) fn run() -> Result<Outcome> {
 /// in order afterwards, exactly as it would have been before — the change buys
 /// cancellation, not concurrency, and pretending otherwise would mean two exports
 /// writing into one staging directory.
+#[cfg(test)]
 fn serve(input: &mut (dyn BufRead + Send), output: &mut dyn Write) -> std::io::Result<()> {
     std::thread::scope(|scope| {
         let (sender, receiver) = std::sync::mpsc::channel::<std::io::Result<String>>();
-        scope.spawn(move || {
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match input.read_line(&mut line) {
-                    // End of input: the client closed the pipe, which is a normal
-                    // shutdown. Dropping the sender is what tells the loop.
-                    Ok(0) => break,
-                    Ok(_) => {
-                        if sender.send(Ok(line.clone())).is_err() {
-                            break;
-                        }
-                    }
-                    Err(error) => {
-                        let _ = sender.send(Err(error));
-                        break;
-                    }
-                }
-            }
-        });
+        scope.spawn(move || forward_lines(input, &sender));
         session(&mut Incoming::new(&receiver), output)
     })
+}
+
+/// Reads lines from `input` and forwards them until the input ends or nobody is
+/// listening. The body of the reader thread, shared by [`run`] and [`serve`].
+fn forward_lines(
+    input: &mut (dyn BufRead + Send),
+    sender: &std::sync::mpsc::Sender<std::io::Result<String>>,
+) {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match input.read_line(&mut line) {
+            // End of input: the client closed the pipe, which is a normal shutdown.
+            // Dropping the sender is what tells the loop.
+            Ok(0) => break,
+            Ok(_) => {
+                if sender.send(Ok(line.clone())).is_err() {
+                    break;
+                }
+            }
+            Err(error) => {
+                let _ = sender.send(Err(error));
+                break;
+            }
+        }
+    }
 }
 
 /// Lines waiting to be handled: from the reader thread, and from mid-call arrivals.
@@ -170,7 +198,15 @@ impl<'a> Incoming<'a> {
     }
 
     /// Whatever has arrived, without waiting long. For use while a call is running.
+    ///
+    /// What is already in hand comes first, and only then does `closed` end the answer.
+    /// The other order dropped a line that had arrived just before the input closed —
+    /// including a `notifications/cancelled`, which is the one message this function
+    /// exists to catch (audit No. 18).
     fn poll(&mut self) -> Option<String> {
+        if let Some(line) = self.queued.pop_front() {
+            return Some(line);
+        }
         if self.closed {
             return None;
         }
@@ -180,7 +216,7 @@ impl<'a> Incoming<'a> {
         {
             Ok(message) => {
                 self.absorb(message);
-                self.queued.pop_back()
+                self.queued.pop_front()
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -261,10 +297,14 @@ fn run_tool_call(call: ToolCall, incoming: &mut Incoming<'_>) -> Response {
         std::thread::spawn(move || tools::call_with_cancel(&name, &arguments, &cancel))
     };
 
+    // Lines that are not this call's cancellation are held aside rather than put back
+    // into `queued`. `poll` now answers from `queued` first, so returning them there
+    // would hand the same line out again on the next turn of this loop, forever.
+    let mut deferred: Vec<String> = Vec::new();
     while !worker.is_finished() {
         match incoming.poll() {
             Some(line) if cancels(&line, &call.id) => cancel.cancel(),
-            Some(line) => incoming.queued.push_back(line),
+            Some(line) => deferred.push(line),
             // Nothing arrived. When input is still open the poll already waited; once it
             // has closed there is nothing left to wait on, so wait deliberately rather
             // than spinning a core until the worker finishes.
@@ -274,6 +314,11 @@ fn run_tool_call(call: ToolCall, incoming: &mut Incoming<'_>) -> Response {
                 }
             }
         }
+    }
+    // Back at the front, in arrival order, so the session handles them before anything
+    // that arrives after this call.
+    for line in deferred.into_iter().rev() {
+        incoming.queued.push_front(line);
     }
 
     let result = match worker.join() {
@@ -442,6 +487,42 @@ fn outcome_to_result(outcome: tools::ToolOutcome) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A line already in hand is returned even after the input has closed. `poll`
+    /// checked `closed` first, so a `notifications/cancelled` that arrived in the same
+    /// breath as the client closing its pipe was dropped — the one message `poll` exists
+    /// to catch (audit No. 18).
+    #[test]
+    fn a_queued_line_survives_the_input_closing() {
+        let (sender, receiver) = std::sync::mpsc::channel::<std::io::Result<String>>();
+        drop(sender);
+        let mut incoming = Incoming::new(&receiver);
+        incoming
+            .queued
+            .push_back("{\"method\":\"notifications/cancelled\"}".to_string());
+        incoming.closed = true;
+
+        assert_eq!(
+            incoming.poll().as_deref(),
+            Some("{\"method\":\"notifications/cancelled\"}")
+        );
+        // And once it has been handed over, the closed input is the answer again.
+        assert!(incoming.poll().is_none());
+    }
+
+    /// Lines come back in the order they arrived, not reversed. `poll` used to take the
+    /// newest of what it had, which would reorder a client's messages.
+    #[test]
+    fn polled_lines_keep_their_arrival_order() {
+        let (sender, receiver) = std::sync::mpsc::channel::<std::io::Result<String>>();
+        let mut incoming = Incoming::new(&receiver);
+        incoming.queued.push_back("first".to_string());
+        incoming.queued.push_back("second".to_string());
+        drop(sender);
+
+        assert_eq!(incoming.poll().as_deref(), Some("first"));
+        assert_eq!(incoming.poll().as_deref(), Some("second"));
+    }
 
     fn drive(input: &str) -> Vec<Value> {
         let mut output = Vec::new();

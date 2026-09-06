@@ -204,6 +204,10 @@ export function stopWatch(): Promise<void> {
 
 export interface WatchChangedEvent {
   changed_paths: string[];
+  /** True when more files changed than one notification carries, so `changed_paths` is a
+   * sample rather than the whole story. Shown to the user rather than hidden: a partial
+   * list presented as complete is worse than an honest count. */
+  truncated: boolean;
 }
 
 export function onWatchChanged(handler: (event: WatchChangedEvent) => void): Promise<UnlistenFn> {

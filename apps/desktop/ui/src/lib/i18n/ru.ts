@@ -341,6 +341,8 @@ export const ru: Record<TranslationKey, string> = {
   "analytics.stat.size": "Общий размер",
 
   "watch.changed": "Изменено файлов в проекте: {count}.",
+  "watch.changedTruncated":
+    "Изменено файлов в проекте: {count}+ — слишком много, чтобы перечислить.",
   "watch.copied": "Сводка изменений скопирована в буфер обмена.",
   "watch.copyFailed": "Не удалось скопировать сводку изменений в буфер обмена.",
   "watch.failed": "Не удалось включить режим слежения",

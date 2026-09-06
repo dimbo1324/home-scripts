@@ -193,6 +193,10 @@ pub struct ExportFinishedEvent {
 #[derive(Debug, Clone, Serialize)]
 pub struct WatchChangedEvent {
     pub changed_paths: Vec<String>,
+    /// True when more paths changed than one notification carries, so `changed_paths` is
+    /// a sample rather than the whole story. The UI says so instead of showing a partial
+    /// list as if it were complete.
+    pub truncated: bool,
 }
 
 // --- History ----------------------------------------------------------------------

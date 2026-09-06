@@ -86,13 +86,19 @@
           if (event.changed_paths.length === 0) {
             return;
           }
-          pushToast("info", "watch.changed", { params: { count: event.changed_paths.length } });
+          pushToast("info", event.truncated ? "watch.changedTruncated" : "watch.changed", {
+            params: { count: event.changed_paths.length },
+          });
 
           // Finding 4, 2026-07-27 audit: this setting was shown to the user and read by
           // nothing. The backend deliberately leaves the decision here (see
           // `commands/watch.rs`), so this is where it belongs.
           if (wizard.sessionConfig?.watch_clipboard_auto_update === true) {
-            const summary = formatWatchSummary(event.changed_paths, wizard.project?.root ?? null);
+            const summary = formatWatchSummary(
+              event.changed_paths,
+              wizard.project?.root ?? null,
+              event.truncated,
+            );
             // Failure is reported rather than swallowed: the user asked for the
             // clipboard to be updated, so silently not updating it would be the same
             // class of defect this change exists to fix.

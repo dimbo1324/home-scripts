@@ -335,6 +335,7 @@ export const en = {
   "analytics.stat.size": "Total size",
 
   "watch.changed": "{count} file(s) changed in this project.",
+  "watch.changedTruncated": "{count}+ file(s) changed in this project — too many to list them all.",
   "watch.copied": "Change summary copied to the clipboard.",
   "watch.copyFailed": "Could not copy the change summary to the clipboard.",
   "watch.failed": "Watch mode could not start",
