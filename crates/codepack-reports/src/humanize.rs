@@ -25,8 +25,35 @@ use crate::reports::project_health;
 
 /// One sentence a non-technical reader can act on.
 pub(crate) struct RiskHighlight {
-    pub severity: &'static str,
+    pub severity: Severity,
     pub text: String,
+}
+
+/// How serious a highlighted risk is.
+///
+/// A type rather than a string because this value is interpolated into HTML twice — once
+/// into a `class` attribute and once as text — and the surrounding code escapes every
+/// other interpolation. Those two were not escaped, which was safe only because the field
+/// happened to hold a literal (audit No. 29). With an enum it cannot hold anything else:
+/// a string derived from a project's own file has no way in, so the rule is kept by the
+/// type instead of by a reader noticing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Severity {
+    High,
+    Medium,
+    Low,
+}
+
+impl Severity {
+    /// The CSS class and the label, which are the same word. Every value is a fixed
+    /// identifier, so no escaping is needed — and none is possible to forget.
+    pub(crate) fn as_class(self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
+        }
+    }
 }
 
 /// One file worth reading first, and why.
@@ -79,7 +106,11 @@ pub(crate) fn summarize(ctx: &ReportContext<'_>) -> PlainLanguageSummary {
         }
         if let Some(reason) = area.reasons.first() {
             risks.push(RiskHighlight {
-                severity: if area.score < 40 { "high" } else { "medium" },
+                severity: if area.score < 40 {
+                    Severity::High
+                } else {
+                    Severity::Medium
+                },
                 text: format!("{}: {reason}", area.name),
             });
         }
@@ -113,11 +144,11 @@ pub(crate) fn summarize(ctx: &ReportContext<'_>) -> PlainLanguageSummary {
     }
 }
 
-fn severity_for(risk_level: &str) -> &'static str {
+fn severity_for(risk_level: &str) -> Severity {
     match risk_level {
-        "high" => "high",
-        "medium" => "medium",
-        _ => "low",
+        "high" => Severity::High,
+        "medium" => Severity::Medium,
+        _ => Severity::Low,
     }
 }
 

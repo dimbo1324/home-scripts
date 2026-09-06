@@ -22,10 +22,14 @@ pub(super) fn write(
         path: staging.to_path_buf(),
         source,
     })?;
-    let mut writer = zip::ZipWriter::new(file);
+    // Buffered, and ZIP64 enabled, for the reasons `build.rs` records at its own writer
+    // (audit No. 30). The two write points must not differ on this: a member that packs
+    // one way and fails the other would be the worst kind of surprise.
+    let mut writer = zip::ZipWriter::new(std::io::BufWriter::with_capacity(1 << 20, file));
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
-        .compression_level(Some(6));
+        .compression_level(Some(6))
+        .large_file(true);
 
     let mut file_count = 0usize;
     for relative in relative_files {
@@ -50,7 +54,13 @@ pub(super) fn write(
         file_count += 1;
     }
 
-    writer.finish().map_err(|source| ArchiveError::Zip {
+    // Flushed explicitly, for the reason `build.rs` records: a buffered writer that
+    // fails to flush while being dropped reports it nowhere.
+    let mut buffered = writer.finish().map_err(|source| ArchiveError::Zip {
+        path: staging.to_path_buf(),
+        source,
+    })?;
+    std::io::Write::flush(&mut buffered).map_err(|source| ArchiveError::Write {
         path: staging.to_path_buf(),
         source,
     })?;

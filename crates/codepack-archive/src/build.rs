@@ -103,12 +103,20 @@ fn write_zip(
         path: archive_path.to_path_buf(),
         source,
     })?;
-    let mut writer = zip::ZipWriter::new(file);
+    // Buffered: without this every member becomes a stream of small writes straight to
+    // the filesystem, and a bundle is thousands of members.
+    let mut writer = zip::ZipWriter::new(std::io::BufWriter::with_capacity(1 << 20, file));
     // Level 6 balances speed vs. size reduction (BLUEPRINT §A.8, legacy comment
     // verbatim: `compresslevel=6`).
+    //
+    // `large_file(true)` writes ZIP64 headers. Off by default in `zip` 8.x, which means a
+    // member past 4 GiB fails at write time — at the very end of an export, after every
+    // other step has already run (audit No. 30). A checked-in dataset or a database dump
+    // reaches that size, and the cost of the flag is a few extra bytes per member.
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
-        .compression_level(Some(6));
+        .compression_level(Some(6))
+        .large_file(true);
 
     let mut count = 0u32;
     for entry in entries {
@@ -133,7 +141,14 @@ fn write_zip(
         })?;
         count += 1;
     }
-    writer.finish().map_err(|source| ArchiveError::Zip {
+    // Flushed explicitly rather than on drop: the writer is buffered now, and a flush
+    // that fails while being dropped has nowhere to report itself — a truncated archive
+    // would look like a complete one.
+    let mut buffered = writer.finish().map_err(|source| ArchiveError::Zip {
+        path: archive_path.to_path_buf(),
+        source,
+    })?;
+    std::io::Write::flush(&mut buffered).map_err(|source| ArchiveError::Write {
         path: archive_path.to_path_buf(),
         source,
     })?;

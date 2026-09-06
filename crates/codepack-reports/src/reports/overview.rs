@@ -230,7 +230,8 @@ fn score_sentence(score: i64) -> String {
 fn risk_item(risk: &RiskHighlight) -> String {
     format!(
         "<li><span class=\"badge {severity}\">{severity}</span>{text}</li>",
-        severity = risk.severity,
+        // A fixed identifier from `Severity`, never a value read out of a project.
+        severity = risk.severity.as_class(),
         text = escape_html(&risk.text)
     )
 }

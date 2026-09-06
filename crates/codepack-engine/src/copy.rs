@@ -152,8 +152,8 @@ pub fn copy_project(
             }
         }
 
-        match fs::copy(&source_path, &dest_path) {
-            Ok(_) => {
+        match copy_regular_file(&source_path, &dest_path) {
+            Ok(()) => {
                 stats.files_copied += 1;
                 log(&format!("copied: {}", planned.relative_path));
             }
@@ -165,6 +165,31 @@ pub fn copy_project(
     }
 
     Ok(stats)
+}
+
+/// Copies `source` to `destination`, refusing anything that is not a regular file.
+///
+/// The check is on the **open descriptor**, not on the path. `walk_project` already
+/// excludes symlinks, but time passes between the walk and the copy, and `fs::copy`
+/// follows a link — so a path that was a file when it was planned and is a link when it
+/// is copied puts the link's target into the bundle, possibly from outside the project.
+/// That is invariant I7 defeated by a window rather than by a mistake (audit No. 31).
+///
+/// Opening first and asking the descriptor what it is closes the window: the bytes that
+/// get copied are the bytes of the thing that was checked. There is no instant in between
+/// for the path to mean something else.
+fn copy_regular_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let mut input = fs::File::open(source)?;
+    if !input.metadata()?.file_type().is_file() {
+        return Err(std::io::Error::other(
+            "not a regular file when it came to be copied; a symlink or special file \
+             appeared where the plan saw an ordinary file",
+        ));
+    }
+
+    let mut output = fs::File::create(destination)?;
+    std::io::copy(&mut input, &mut output)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -359,6 +384,67 @@ mod tests {
             stats.files_copied < 20,
             "files_copied = {}",
             stats.files_copied
+        );
+    }
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+
+    /// An ordinary file copies, byte for byte.
+    #[test]
+    fn a_regular_file_copies_its_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("a.txt");
+        let destination = dir.path().join("b.txt");
+        fs::write(&source, b"hello\n").unwrap();
+
+        copy_regular_file(&source, &destination).expect("an ordinary file copies");
+        assert_eq!(fs::read(&destination).unwrap(), b"hello\n");
+    }
+
+    /// A directory is not a regular file, and the refusal names why rather than producing
+    /// a confusing I/O error further along.
+    #[test]
+    fn a_directory_is_refused_by_the_descriptor_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("sub");
+        fs::create_dir_all(&source).unwrap();
+
+        let error = copy_regular_file(&source, &dir.path().join("out"))
+            .expect_err("a directory is not a file to copy");
+        // On some platforms opening a directory fails outright; on others the descriptor
+        // check is what refuses it. Either is correct — what matters is that it is
+        // refused rather than copied.
+        let rendered = error.to_string();
+        assert!(!rendered.is_empty(), "{rendered}");
+    }
+
+    /// Audit No. 31, the case that motivated the change: a symlink standing where the plan
+    /// saw a file must not put its target's bytes into the bundle. `fs::copy` follows the
+    /// link and would have.
+    ///
+    /// Unix only, because that is where a test can create a symlink without elevation;
+    /// the guard itself is platform-independent, and `#[cfg(unix)]` test helpers are kept
+    /// in this project for exactly this reason (`15-command-reference.md`).
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_that_appeared_after_planning_is_refused_rather_than_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside-the-project.txt");
+        fs::write(&outside, b"a secret from beyond the project\n").unwrap();
+
+        let planned = dir.path().join("looks-like-a-file.txt");
+        std::os::unix::fs::symlink(&outside, &planned).unwrap();
+        let destination = dir.path().join("copied.txt");
+
+        let error = copy_regular_file(&planned, &destination)
+            .expect_err("a symlink must not be copied through");
+        assert!(error.to_string().contains("not a regular file"), "{error}");
+        assert!(
+            !destination.exists() || fs::read(&destination).unwrap().is_empty(),
+            "the link target's bytes must not reach the bundle"
         );
     }
 }

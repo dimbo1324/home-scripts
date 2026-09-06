@@ -63,9 +63,19 @@ fn provider_confidence(
     if !strict_checksums {
         return found.confidence;
     }
-    // `find_provider_matches` reports byte offsets into this same line, and the shapes
-    // it matches are ASCII, so the slice is always on a character boundary.
-    let token = &line[found.start..found.end];
+    // `get` rather than an index. The offsets come from a matcher that tries every
+    // *byte* position, so a rule beginning with an optional segment could report a span
+    // starting inside a multi-byte character — and indexing there is a panic inside the
+    // security scanner, on somebody's non-ASCII source line. No rule does that today; the
+    // comment that used to stand here said so and left the panic one rule away
+    // (audit No. 32).
+    //
+    // A span that is not on a character boundary yields the rule's own confidence
+    // unchanged: failing to run a checksum is not evidence about the token, and the safe
+    // direction is never to weaken a verdict.
+    let Some(token) = line.get(found.start..found.end) else {
+        return found.confidence;
+    };
     match checksum::verdict_for(found.rule_id, token) {
         checksum::ChecksumVerdict::Invalid => "medium",
         checksum::ChecksumVerdict::Valid | checksum::ChecksumVerdict::Unknown => found.confidence,

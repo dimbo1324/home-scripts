@@ -194,7 +194,8 @@ fn write_html_dashboard(ctx: &ReportContext<'_>, output_file: &Path) -> Result<(
             .map(|risk| {
                 format!(
                     "<li><span class=\"badge {sev}\">{sev}</span>{text}</li>",
-                    sev = risk.severity,
+                    // A fixed identifier from `Severity`, never project content.
+                    sev = risk.severity.as_class(),
                     text = escape_html(&risk.text)
                 )
             })

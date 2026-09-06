@@ -1195,3 +1195,42 @@ fn a_text_extension_holding_binary_content_is_not_scanned_as_text() {
     let result = scan_project(dir.path(), &[PathBuf::from("fake.py")], None, &no_cancel()).unwrap();
     assert_eq!(result.summary.total_findings, 0);
 }
+
+/// Audit No. 32: `find_provider_matches` tries every **byte** offset, so a span can in
+/// principle begin inside a multi-byte character. Indexing a `&str` there panics — inside
+/// the security scanner, on somebody's non-ASCII source line. No rule reports such a span
+/// today, which is exactly why the comment that used to assert it was safe left the panic
+/// one new rule away.
+#[test]
+fn a_project_full_of_non_ascii_lines_scans_without_panicking() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = concat!(
+        "ключ = AKIAIOSFODNN7EXAMPLE\n",
+        "# комментарий про токены и пароли\n",
+        "секрет=ghp_0123456789abcdefghij0123456789abcd\n",
+        "日本語 xoxb-1234-5678-abcdefghijklmnop\n",
+        "émoji 🔑 sk-0123456789abcdefghijklmnopqrstuvwxyzABCD\n",
+        "пароль: \"очень-секретное-значение\"\n",
+    );
+    write_file(dir.path(), "конфиг.py", body);
+
+    // Both settings, because the byte slice only runs under strict checksums.
+    for strict in [true, false] {
+        // Returning at all is the assertion; a panic here is the defect.
+        let result = scan_with(
+            dir.path(),
+            &[PathBuf::from("конфиг.py")],
+            &ScanOptions {
+                strict_token_checksums: strict,
+                ..ScanOptions::default()
+            },
+        );
+
+        // And it still finds the credentials that are there, so the guard did not turn
+        // the scanner off for these lines.
+        assert!(
+            !result.findings.is_empty(),
+            "non-ASCII context must not suppress detection (strict = {strict})"
+        );
+    }
+}
