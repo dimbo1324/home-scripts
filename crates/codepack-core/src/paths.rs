@@ -799,11 +799,33 @@ mod tests {
         );
     }
 
+    /// The database lives in the data directory, which is the settings directory only
+    /// where the platform says those are the same place.
+    ///
+    /// This test said `settings_dir` until 2026-09-06 and passed on Windows and macOS
+    /// for the rest of that day, because there the two are equal and the assertion could
+    /// not tell them apart. Ubuntu failed it in one CI round. Both halves are asserted
+    /// here so neither platform can make it vacuous again.
     #[test]
-    fn db_file_lives_under_settings_dir() {
+    fn db_file_lives_under_the_data_dir() {
         let paths = AppPaths::for_root(Path::new("/tmp/codepack-test-root"));
-        assert_eq!(paths.db_file().parent(), Some(paths.settings_dir()));
+        assert_eq!(paths.db_file().parent(), Some(paths.data_dir()));
         assert_eq!(paths.db_file().file_name().unwrap(), "codepack.db");
+    }
+
+    /// And on a split layout it is genuinely *not* beside the settings — the whole point
+    /// of the move. Forced rather than taken from the running platform, so this holds on
+    /// the Windows machine the project is developed on as well as on Linux.
+    #[test]
+    fn a_split_layout_keeps_the_database_out_of_the_settings_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = split_paths(root.path());
+        assert_ne!(paths.db_file().parent(), Some(paths.settings_dir()));
+        assert_eq!(paths.db_file().parent(), Some(paths.data_dir()));
+        assert_eq!(
+            paths.superseded_db_file().parent(),
+            Some(paths.settings_dir())
+        );
     }
 
     #[test]
