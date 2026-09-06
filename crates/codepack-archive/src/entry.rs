@@ -2,8 +2,9 @@
 //! `services/archive_service.py::classify_archive_group`/`_iter_archive_entries`).
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
-use codepack_core::{CancellationToken, ExportPaths};
+use codepack_core::{CancellationToken, ExportPaths, file_groups};
 
 use crate::error::{ArchiveError, Result};
 
@@ -17,30 +18,40 @@ pub struct ArchiveEntry {
 
 const METADATA_TOP_LEVEL_NAMES: [&str; 3] = ["index.md", "manifest.json", "project_profile.json"];
 const TEST_COMPONENT_NAMES: [&str; 2] = ["__tests__", "spec"];
-const DOC_FILE_NAMES: [&str; 3] = ["readme.md", "license", "changelog.md"];
-const DOC_SUFFIXES: [&str; 4] = ["md", "rst", "adoc", "txt"];
-const PYTHON_SUFFIXES: [&str; 3] = ["py", "pyw", "pyi"];
-const FRONTEND_SUFFIXES: [&str; 13] = [
-    "js", "jsx", "ts", "tsx", "mjs", "cjs", "css", "scss", "sass", "html", "vue", "svelte", "astro",
-];
-const BACKEND_SUFFIXES: [&str; 12] = [
-    "go", "rs", "java", "kt", "kts", "cs", "cpp", "c", "h", "hpp", "rb", "php",
-];
-const CONFIG_SUFFIXES: [&str; 9] = [
-    "json",
-    "yaml",
-    "yml",
-    "toml",
-    "ini",
-    "cfg",
-    "conf",
-    "lock",
-    "dockerfile",
-];
-const ASSET_SUFFIXES: [&str; 11] = [
-    "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "pdf", "docx", "xlsx", "pptx",
-];
-const DATA_SUFFIXES: [&str; 4] = ["csv", "tsv", "sql", "xml"];
+// Assembled from `codepack_core::file_groups` rather than typed out, so an extension
+// added for both classifiers reaches both. Where this classifier's legacy original was
+// wider than the export plan's, the difference is a named set rather than an unexplained
+// extra entry (audit No. 24). Membership is what these are asked for, so the assembled
+// order is immaterial.
+static DOC_FILE_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    file_groups::joined(
+        file_groups::DOC_NAMES_SHARED,
+        file_groups::DOC_NAMES_ARCHIVE_ONLY,
+    )
+});
+static DOC_SUFFIXES: LazyLock<Vec<&'static str>> =
+    LazyLock::new(|| file_groups::DOC_SHARED.to_vec());
+static PYTHON_SUFFIXES: LazyLock<Vec<&'static str>> =
+    LazyLock::new(|| file_groups::PYTHON_SHARED.to_vec());
+static FRONTEND_SUFFIXES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    file_groups::joined(
+        file_groups::FRONTEND_SHARED,
+        file_groups::FRONTEND_ARCHIVE_ONLY,
+    )
+});
+static BACKEND_SUFFIXES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    file_groups::joined(
+        file_groups::BACKEND_SHARED,
+        file_groups::BACKEND_ARCHIVE_ONLY,
+    )
+});
+static CONFIG_SUFFIXES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    file_groups::joined(file_groups::CONFIG_SHARED, file_groups::CONFIG_ARCHIVE_ONLY)
+});
+static ASSET_SUFFIXES: LazyLock<Vec<&'static str>> =
+    LazyLock::new(|| file_groups::ASSET_SHARED.to_vec());
+static DATA_SUFFIXES: LazyLock<Vec<&'static str>> =
+    LazyLock::new(|| file_groups::joined(file_groups::DATA_SHARED, file_groups::DATA_ARCHIVE_ONLY));
 
 /// Lowercased path components of `arcname`, mirroring Python's
 /// `[part.casefold() for part in arcname.parts]`. `to_lowercase` rather than a true

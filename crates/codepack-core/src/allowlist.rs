@@ -29,14 +29,16 @@
 //!
 //! ## Scope boundary
 //!
-//! This module only *describes* the file and computes fingerprints. Deciding which
-//! findings to suppress is the caller's job, and today the only callers are
-//! `codepack-cli`'s `scan` and `verify` commands. It is deliberately **not** applied
-//! inside `codepack-security`, inside `codepack-engine`'s pipeline, or in the ~30
-//! reports: those produce artifacts whose shape is a contract (invariant I5) and whose
-//! output is pinned by golden parity tests, and quietly shrinking them from a
-//! convenience file would be a much larger promise than this feature is making. See
-//! `docs/__arch__/open-questions.md` for whether that boundary should ever move.
+//! This module only *describes* the file and computes fingerprints. Who applies it, and
+//! where, is documented beside the code that does — see `codepack_security::allow`.
+//!
+//! The paragraph that used to stand here said the file was honoured only by
+//! `codepack-cli`'s `scan` and `verify` and deliberately not inside `codepack-security`
+//! or the pipeline. That stopped being true when the boundary moved, and nothing brought
+//! it along (audit No. 25). A description of scope does not belong in the module that
+//! defines a format: it is the part most likely to change, and the part a reader most
+//! needs to be able to trust — "does `.codepack-allow` hide a finding in the bundle I am
+//! about to send?" is a security question with a real answer.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

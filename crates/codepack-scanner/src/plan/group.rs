@@ -3,6 +3,8 @@
 
 use std::path::Path;
 
+use codepack_core::file_groups;
+
 pub(super) fn classify_group(relative_path: &Path) -> &'static str {
     let name = relative_path
         .file_name()
@@ -20,44 +22,35 @@ pub(super) fn classify_group(relative_path: &Path) -> &'static str {
     if is_test_segment || name.starts_with("test_") {
         return "tests";
     }
-    if matches!(suffix.as_str(), "py" | "pyw" | "pyi") {
+    // The sets come from `codepack_core::file_groups`, shared with the archive's own
+    // classifier. The two are parity ports of different legacy functions and stay two
+    // classifiers, but they no longer keep two independently drifting lists of
+    // extensions — which is how `.rb` came to be "backend" in one and "other" here
+    // (audit No. 24). Where this one's legacy original was narrower or wider, the
+    // difference is a named set rather than a silent omission.
+    let has = |set: &[&str]| set.contains(&suffix.as_str());
+
+    if has(file_groups::PYTHON_SHARED) {
         return "python_source";
     }
-    if matches!(
-        suffix.as_str(),
-        "js" | "jsx" | "ts" | "tsx" | "css" | "scss" | "html" | "vue" | "svelte"
-    ) {
+    if has(file_groups::FRONTEND_SHARED) {
         return "frontend_source";
     }
-    if matches!(
-        suffix.as_str(),
-        "go" | "rs" | "java" | "kt" | "cs" | "c" | "cpp" | "h" | "hpp"
-    ) {
+    if has(file_groups::BACKEND_SHARED) {
         return "backend_or_system_source";
     }
-    if matches!(suffix.as_str(), "md" | "rst" | "adoc" | "txt")
-        || name == "readme.md"
-        || name == "license"
-    {
+    if has(file_groups::DOC_SHARED) || file_groups::DOC_NAMES_SHARED.contains(&name.as_str()) {
         return "docs";
     }
-    if matches!(
-        suffix.as_str(),
-        "json" | "yaml" | "yml" | "toml" | "ini" | "cfg" | "conf" | "lock"
-    ) || name.starts_with("dockerfile")
-    {
+    // `dockerfile` is matched as a name prefix here and as a suffix in the archive: two
+    // spellings of one intention, both inherited from legacy.
+    if has(file_groups::CONFIG_SHARED) || name.starts_with("dockerfile") {
         return "config_and_locks";
     }
-    if matches!(
-        suffix.as_str(),
-        "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg" | "ico" | "pdf" | "docx" | "xlsx" | "pptx"
-    ) {
+    if has(file_groups::ASSET_SHARED) {
         return "assets_and_binary_docs";
     }
-    if matches!(
-        suffix.as_str(),
-        "db" | "sqlite" | "sqlite3" | "csv" | "tsv" | "sql" | "dump" | "bak"
-    ) {
+    if has(file_groups::DATA_SHARED) || has(file_groups::DATA_PLAN_ONLY) {
         return "data_and_exports";
     }
     "other"

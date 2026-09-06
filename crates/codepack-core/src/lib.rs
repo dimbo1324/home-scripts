@@ -2,6 +2,7 @@ pub mod allowlist;
 mod cancellation;
 pub mod classify;
 mod error;
+pub mod file_groups;
 mod paths;
 mod progress;
 pub mod time;
