@@ -13,6 +13,7 @@ mod cli;
 mod commands;
 mod error;
 mod exit;
+mod git_scope;
 mod history_scan;
 mod mcp;
 mod output;

@@ -248,10 +248,15 @@ fn canonicalize(path: &Path) -> Result<PathBuf> {
 }
 
 /// The plan stores backslash-joined relative paths regardless of platform (a documented
-/// contract of `codepack_scanner::ExportPlan`) — rebuild a real path component-by-
-/// component rather than handing the string straight to `Path::new`.
+/// contract of `codepack_scanner::ExportPlan`). One definition of the rebuild, shared with
+/// the engine and the CLI: [`codepack_core::relative_from_stored`], which validates the
+/// components as well (audit No. 23).
+///
+/// An unsafe path resolves to the empty path, which `process_file` then joins onto the
+/// source root — so it names the root, is not a file, and is reported as an error for that
+/// entry rather than being written anywhere it should not be.
 fn to_relative_path(relative: &str) -> PathBuf {
-    relative.split('\\').collect()
+    codepack_core::relative_from_stored(relative).unwrap_or_default()
 }
 
 fn process_file(

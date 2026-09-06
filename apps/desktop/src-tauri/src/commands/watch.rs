@@ -310,10 +310,14 @@ mod tests {
                 .push((paths, truncated));
         });
 
-        // What an editor save looks like: several events within a few milliseconds.
+        // What an editor save looks like: several events in immediate succession. Pushed
+        // without sleeping between them on purpose — a sleep here would make the test
+        // assert that the machine scheduled two threads within the debounce window, which
+        // a loaded CI box does not promise. The gap between bursts is what
+        // `two_separated_bursts_are_two_notifications` covers, and it uses a margin
+        // several times the window.
         for index in 0..4 {
             coalescer.push([format!("/project/src/file{index}.rs")]);
-            std::thread::sleep(Duration::from_millis(10));
         }
 
         // Past the quiet period, with room for the thread to be scheduled.
@@ -342,7 +346,6 @@ mod tests {
         });
 
         coalescer.push(["/project/first.rs".to_string()]);
-        std::thread::sleep(Duration::from_millis(20));
         coalescer.push(["/project/last.rs".to_string()]);
 
         std::thread::sleep(DEBOUNCE * 3);

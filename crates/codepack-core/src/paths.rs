@@ -200,6 +200,30 @@ pub fn canonicalize_existing(path: &std::path::Path) -> std::io::Result<std::pat
     Ok(stripped.unwrap_or(canonical))
 }
 
+/// Rebuilds a stored `PlannedFile.relative_path` into real path components.
+///
+/// The plan stores its paths backslash-joined on every platform — this project's own
+/// convention, documented by `codepack_scanner::plan`. `Path::new` on such a string is
+/// wrong everywhere but Windows: on Linux and macOS a backslash is an ordinary filename
+/// character, so `src\main.rs` becomes one file with a backslash in its name rather than
+/// `src/main.rs`.
+///
+/// One definition rather than the three byte-identical private copies that existed in
+/// `codepack-cli`, `codepack-engine` and `codepack-sanitize` (audit No. 23). Each copy was
+/// an independent place for this to drift, and each was an unvalidated reconstruction of
+/// a path that then had `source_root.join(...)` applied to it.
+///
+/// Validating is the other half. The result is checked the same way an archive member
+/// name is: a component that is not `Normal` — `..`, a root, a Windows drive prefix —
+/// makes the whole path an error rather than something a caller joins onto a root and
+/// writes through (audit No. 10's shape, one layer along).
+pub fn relative_from_stored(stored: &str) -> std::result::Result<PathBuf, UnsafeRelativePath> {
+    let rebuilt: PathBuf = stored.split('\\').collect();
+    // Against an empty base: the question here is only whether the components are safe,
+    // and the caller supplies its own root afterwards.
+    safe_join(std::path::Path::new(""), &rebuilt)
+}
+
 /// A relative path from an untrusted source that would not stay under its base.
 #[derive(Debug, thiserror::Error)]
 #[error("unsafe relative path: {path}")]

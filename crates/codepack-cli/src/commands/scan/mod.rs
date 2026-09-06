@@ -206,8 +206,12 @@ pub(crate) fn build_staged_with_cancel(
     ))
 }
 
+/// Shared with the engine and `codepack-sanitize` — see
+/// [`codepack_core::relative_from_stored`], which validates as well as rebuilds
+/// (audit No. 23). An unsafe path resolves to the empty path and the scan simply finds
+/// nothing at it.
 fn to_relative_path(relative: &str) -> std::path::PathBuf {
-    relative.split('\\').collect()
+    codepack_core::relative_from_stored(relative).unwrap_or_default()
 }
 
 #[cfg(test)]

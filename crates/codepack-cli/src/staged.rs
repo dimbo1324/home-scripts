@@ -96,7 +96,7 @@ pub(crate) fn collect(project_root: &Path) -> Result<StagedContent> {
     };
 
     let mut options = DiffOptions::new();
-    if let Some(scope) = scope_pathspec(&repository, project_root) {
+    if let Some(scope) = crate::git_scope::scope_pathspec(&repository, project_root) {
         options.pathspec(scope);
     }
     let diff = repository
@@ -171,36 +171,6 @@ pub(crate) fn collect(project_root: &Path) -> Result<StagedContent> {
 
 fn git_error(action: &str, error: &git2::Error) -> CliError {
     CliError::message(format!("cannot {action}: {}", error.message()))
-}
-
-/// `project_root` expressed relative to the repository's working directory, in the
-/// forward-slash form git pathspecs use.
-///
-/// Returns `None` when the project *is* the repository root (no narrowing needed), when
-/// the repository has no working directory (bare), or when the two cannot be related —
-/// in which case scanning the whole repository is the safe direction to fail.
-fn scope_pathspec(repository: &Repository, project_root: &Path) -> Option<String> {
-    let workdir = repository.workdir()?;
-    // Both sides are canonicalised so that a path reached through a symlinked or
-    // shortened parent still matches the workdir prefix. On failure, fall back to the
-    // path as given rather than silently widening the scope to the whole repository.
-    let workdir = std::fs::canonicalize(workdir).unwrap_or_else(|_| workdir.to_path_buf());
-    let project =
-        std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
-
-    let relative = project.strip_prefix(&workdir).ok()?;
-    if relative.as_os_str().is_empty() {
-        return None;
-    }
-
-    let mut pathspec = String::new();
-    for component in relative.components() {
-        if !pathspec.is_empty() {
-            pathspec.push('/');
-        }
-        pathspec.push_str(&component.as_os_str().to_string_lossy());
-    }
-    Some(pathspec)
 }
 
 #[cfg(test)]

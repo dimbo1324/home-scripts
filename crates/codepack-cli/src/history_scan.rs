@@ -168,7 +168,7 @@ pub(crate) fn collect(project_root: &Path, options: &HistoryOptions) -> Result<H
     // monorepo the repository root is usually an ancestor of the project being scanned,
     // and an unscoped walk would report another package's history under this project's
     // name.
-    let pathspec = scope_pathspec(&repository, project_root);
+    let pathspec = crate::git_scope::scope_pathspec(&repository, project_root);
 
     let directory = tempfile::tempdir().map_err(|source| CliError::Read {
         path: project_root.to_path_buf(),
@@ -335,31 +335,6 @@ fn short_oid(id: Oid) -> String {
 
 fn git_error(action: &str, error: &git2::Error) -> CliError {
     CliError::message(format!("cannot {action}: {}", error.message()))
-}
-
-/// `project_root` relative to the repository's working directory, in the forward-slash
-/// form git pathspecs use. Identical in intent to `staged::scope_pathspec`; kept beside
-/// its own walk rather than shared, because the two modules answer different questions
-/// and a change to one is not automatically right for the other.
-fn scope_pathspec(repository: &Repository, project_root: &Path) -> Option<String> {
-    let workdir = repository.workdir()?;
-    let workdir = std::fs::canonicalize(workdir).unwrap_or_else(|_| workdir.to_path_buf());
-    let project =
-        std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
-
-    let relative = project.strip_prefix(&workdir).ok()?;
-    if relative.as_os_str().is_empty() {
-        return None;
-    }
-
-    let mut pathspec = String::new();
-    for component in relative.components() {
-        if !pathspec.is_empty() {
-            pathspec.push('/');
-        }
-        pathspec.push_str(&component.as_os_str().to_string_lossy());
-    }
-    Some(pathspec)
 }
 
 #[cfg(test)]
