@@ -99,7 +99,9 @@ pub fn resolve_export_result(result_path: &str) -> CommandResult<PathBuf> {
 /// recorded in is not a decision the webview gets to make.
 pub fn open_database() -> CommandResult<codepack_storage::Connection> {
     let paths = codepack_core::AppPaths::resolve()?;
-    let db_file = paths.db_file();
+    // See `codepack_core::migrated_db_file`: on Linux the database moved out of the
+    // settings directory, and an older installation still has its history there.
+    let db_file = codepack_core::migrated_db_file(&paths);
     if let Some(parent) = db_file.parent() {
         std::fs::create_dir_all(parent)?;
     }

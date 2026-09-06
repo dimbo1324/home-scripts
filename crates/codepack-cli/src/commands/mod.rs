@@ -107,9 +107,14 @@ pub(crate) fn canonicalize_existing(path: &Path) -> Result<PathBuf> {
 }
 
 /// Opens the history database, creating its directory if needed.
+///
+/// Through `migrated_db_file` rather than `db_file`: on Linux the database moved out of
+/// the settings directory on 2026-09-06, and an installation from before that still has
+/// its history in the old place. That helper moves it, and hands back the old path
+/// unchanged if the move cannot be made — the history is worth more than the tidiness.
 pub(crate) fn open_history_db() -> Result<codepack_storage::Connection> {
     let app_paths = AppPaths::resolve()?;
-    let db_file = app_paths.db_file();
+    let db_file = codepack_core::migrated_db_file(&app_paths);
     if let Some(parent) = db_file.parent() {
         std::fs::create_dir_all(parent).map_err(|source| CliError::Read {
             path: parent.to_path_buf(),

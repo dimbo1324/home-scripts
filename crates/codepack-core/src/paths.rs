@@ -33,14 +33,41 @@ fn current_os() -> Os {
     }
 }
 
-fn layout(os: Os, home_dir: &Path, config_dir: &Path, data_local_dir: &Path) -> (PathBuf, PathBuf) {
+/// The three directories this application owns, per platform (BLUEPRINT §D.4).
+///
+/// Settings, **data**, and logs. Data is separate from settings only on Linux, and that
+/// is the whole reason it exists as a concept here: the XDG Base Directory specification
+/// reserves `~/.config` for configuration, and the history database is not configuration.
+/// Left there — as it was until 2026-09-06 — a multi-megabyte SQLite file with its `-wal`
+/// sibling lands in the directory people put in a dotfiles repository or sync between
+/// machines.
+///
+/// Windows and macOS keep one directory for both: `%APPDATA%\codepack` and
+/// `~/Library/Application Support/codepack` are where each platform expects an
+/// application's own data as well as its settings, and moving an existing installation's
+/// database for no reason would be a migration with nothing on the other side of it.
+fn layout(
+    os: Os,
+    home_dir: &Path,
+    config_dir: &Path,
+    data_local_dir: &Path,
+) -> (PathBuf, PathBuf, PathBuf) {
     let settings_dir = config_dir.join(APP_NAME);
-    let log_dir = match os {
-        Os::Windows => data_local_dir.join(APP_NAME).join("logs"),
-        Os::Mac => home_dir.join("Library").join("Logs").join(APP_NAME),
-        Os::Linux => home_dir.join(".local").join("state").join(APP_NAME),
+    let (data_dir, log_dir) = match os {
+        Os::Windows => (
+            settings_dir.clone(),
+            data_local_dir.join(APP_NAME).join("logs"),
+        ),
+        Os::Mac => (
+            settings_dir.clone(),
+            home_dir.join("Library").join("Logs").join(APP_NAME),
+        ),
+        Os::Linux => (
+            data_local_dir.join(APP_NAME),
+            home_dir.join(".local").join("state").join(APP_NAME),
+        ),
     };
-    (settings_dir, log_dir)
+    (settings_dir, data_dir, log_dir)
 }
 
 pub(crate) fn home_dir_from_env() -> Option<PathBuf> {
@@ -68,15 +95,23 @@ fn resolve_base_dirs() -> Result<(PathBuf, PathBuf, PathBuf)> {
                 .ok_or(CoreError::NoAppDirectories)?;
             (roaming, local)
         }
-        Os::Mac => (
-            home_dir.join("Library").join("Application Support"),
-            PathBuf::new(),
-        ),
+        Os::Mac => {
+            // One directory for both; `layout` records why.
+            let support = home_dir.join("Library").join("Application Support");
+            (support.clone(), support)
+        }
         Os::Linux => {
             let config = std::env::var_os("XDG_CONFIG_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home_dir.join(".config"));
-            (config, PathBuf::new())
+            // `$XDG_DATA_HOME`, defaulting as the specification says. An empty value is
+            // treated as unset, which is what the specification requires and what a
+            // shell that exports the variable without setting it produces.
+            let data = std::env::var_os("XDG_DATA_HOME")
+                .map(PathBuf::from)
+                .filter(|value| !value.as_os_str().is_empty())
+                .unwrap_or_else(|| home_dir.join(".local").join("share"));
+            (config, data)
         }
     };
     Ok((home_dir, config_dir, data_local_dir))
@@ -86,16 +121,19 @@ fn resolve_base_dirs() -> Result<(PathBuf, PathBuf, PathBuf)> {
 pub struct AppPaths {
     home_dir: PathBuf,
     settings_dir: PathBuf,
+    data_dir: PathBuf,
     log_dir: PathBuf,
 }
 
 impl AppPaths {
     pub fn resolve() -> Result<Self> {
         let (home_dir, config_dir, data_local_dir) = resolve_base_dirs()?;
-        let (settings_dir, log_dir) = layout(current_os(), &home_dir, &config_dir, &data_local_dir);
+        let (settings_dir, data_dir, log_dir) =
+            layout(current_os(), &home_dir, &config_dir, &data_local_dir);
         Ok(Self {
             home_dir,
             settings_dir,
+            data_dir,
             log_dir,
         })
     }
@@ -104,10 +142,12 @@ impl AppPaths {
         let home_dir = root.join("home");
         let config_dir = root.join("config");
         let data_local_dir = root.join("data_local");
-        let (settings_dir, log_dir) = layout(current_os(), &home_dir, &config_dir, &data_local_dir);
+        let (settings_dir, data_dir, log_dir) =
+            layout(current_os(), &home_dir, &config_dir, &data_local_dir);
         Self {
             home_dir,
             settings_dir,
+            data_dir,
             log_dir,
         }
     }
@@ -136,7 +176,24 @@ impl AppPaths {
         self.home_dir.join(LEGACY_HISTORY_FILE_NAME)
     }
 
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    /// Where the history database belongs. On Linux that is `$XDG_DATA_HOME/codepack`,
+    /// not the settings directory; see [`layout`].
+    ///
+    /// A getter, so it does no I/O and moves nothing: an installation that still has its
+    /// database in the old place is handled by [`migrated_db_file`], which the two
+    /// callers that open the database go through.
     pub fn db_file(&self) -> PathBuf {
+        self.data_dir.join(DB_FILE_NAME)
+    }
+
+    /// Where the database used to live: beside the settings, on every platform.
+    ///
+    /// Equal to [`Self::db_file`] on Windows and macOS, where nothing moved.
+    pub fn superseded_db_file(&self) -> PathBuf {
         self.settings_dir.join(DB_FILE_NAME)
     }
 
@@ -157,6 +214,69 @@ impl AppPaths {
     pub fn model_limits_file(&self) -> PathBuf {
         self.settings_dir.join(MODEL_LIMITS_FILE_NAME)
     }
+}
+
+/// The database to open, having first moved one left behind by an older version.
+///
+/// On Linux the database moved out of `~/.config/codepack` and into
+/// `$XDG_DATA_HOME/codepack` on 2026-09-06 ([`layout`] explains why). An installation
+/// from before that has its history in the old place, and losing somebody's export
+/// history to a tidying-up is not an acceptable trade for correctness about directories.
+///
+/// **Never fails, and never loses data.** If anything about the move does not work — a
+/// cross-device rename, a read-only directory, a permission the user does not have —
+/// this returns the *old* path and the application keeps using the database where it
+/// already is. A wrong directory is a nuisance; a missing history is not.
+///
+/// The `-wal` and `-shm` siblings travel with it. A WAL file holds committed transactions
+/// that have not been checkpointed into the main file yet, so moving the database without
+/// it can discard the most recent exports — the exact data the user would notice.
+///
+/// A no-op on Windows and macOS, where the two paths are the same.
+pub fn migrated_db_file(paths: &AppPaths) -> PathBuf {
+    let destination = paths.db_file();
+    let source = paths.superseded_db_file();
+    if source == destination || !source.is_file() || destination.exists() {
+        return destination;
+    }
+
+    if std::fs::create_dir_all(&paths.data_dir).is_err() {
+        return source;
+    }
+    if !move_file(&source, &destination) {
+        return source;
+    }
+
+    // Best effort, and after the database itself: a sidecar that fails to move leaves a
+    // stale file behind, which SQLite ignores, rather than a database without its log.
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = with_suffix(&source, suffix);
+        if sidecar.is_file() {
+            let _ = move_file(&sidecar, &with_suffix(&destination, suffix));
+        }
+    }
+    destination
+}
+
+/// Renames, falling back to copy-and-remove when the two paths are on different
+/// filesystems — `~/.config` and `~/.local/share` usually are not, but a separately
+/// mounted one is a normal thing for someone to have arranged.
+fn move_file(source: &Path, destination: &Path) -> bool {
+    if std::fs::rename(source, destination).is_ok() {
+        return true;
+    }
+    if std::fs::copy(source, destination).is_err() {
+        return false;
+    }
+    // The copy is what matters; a source that will not delete leaves a harmless orphan.
+    let _ = std::fs::remove_file(source);
+    true
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
 }
 
 /// `std::fs::canonicalize` returns a `\\?\`-prefixed path on Windows, which is correct
@@ -487,7 +607,7 @@ mod tests {
 
     #[test]
     fn windows_layout_matches_blueprint_d4() {
-        let (settings_dir, log_dir) = layout(
+        let (settings_dir, data_dir, log_dir) = layout(
             Os::Windows,
             Path::new("C:/Users/dev"),
             Path::new("C:/Users/dev/AppData/Roaming"),
@@ -497,6 +617,9 @@ mod tests {
             settings_dir,
             Path::new("C:/Users/dev/AppData/Roaming/codepack")
         );
+        // One directory for settings and data. Existing installations have their
+        // database here and nothing about Windows asks for it to move.
+        assert_eq!(data_dir, settings_dir);
         assert_eq!(
             log_dir,
             Path::new("C:/Users/dev/AppData/Local/codepack/logs")
@@ -505,29 +628,129 @@ mod tests {
 
     #[test]
     fn macos_layout_matches_blueprint_d4() {
-        let (settings_dir, log_dir) = layout(
+        let (settings_dir, data_dir, log_dir) = layout(
             Os::Mac,
             Path::new("/Users/dev"),
             Path::new("/Users/dev/Library/Application Support"),
-            Path::new(""),
+            Path::new("/Users/dev/Library/Application Support"),
         );
         assert_eq!(
             settings_dir,
             Path::new("/Users/dev/Library/Application Support/codepack")
         );
+        assert_eq!(data_dir, settings_dir);
         assert_eq!(log_dir, Path::new("/Users/dev/Library/Logs/codepack"));
     }
 
+    /// The one platform where settings and data are different directories, which is the
+    /// whole reason `data_dir` exists: XDG reserves `~/.config` for configuration, and a
+    /// SQLite history with a `-wal` beside it is not configuration.
     #[test]
     fn linux_layout_matches_blueprint_d4() {
-        let (settings_dir, log_dir) = layout(
+        let (settings_dir, data_dir, log_dir) = layout(
             Os::Linux,
             Path::new("/home/dev"),
             Path::new("/home/dev/.config"),
-            Path::new(""),
+            Path::new("/home/dev/.local/share"),
         );
         assert_eq!(settings_dir, Path::new("/home/dev/.config/codepack"));
+        assert_eq!(data_dir, Path::new("/home/dev/.local/share/codepack"));
+        assert_ne!(data_dir, settings_dir);
         assert_eq!(log_dir, Path::new("/home/dev/.local/state/codepack"));
+    }
+
+    /// A `for_root` layout with the Linux split forced, so the migration can be tested
+    /// on any host. `AppPaths` fields are private and `for_root` follows the *running*
+    /// platform, which on Windows would make both paths equal and the test vacuous.
+    fn split_paths(root: &Path) -> AppPaths {
+        AppPaths {
+            home_dir: root.join("home"),
+            settings_dir: root.join("config").join(APP_NAME),
+            data_dir: root.join("data").join(APP_NAME),
+            log_dir: root.join("state").join(APP_NAME),
+        }
+    }
+
+    fn write(path: &Path, contents: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn a_database_left_in_the_settings_directory_moves_to_the_data_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = split_paths(root.path());
+        write(&paths.superseded_db_file(), "history");
+
+        let opened = migrated_db_file(&paths);
+
+        assert_eq!(opened, paths.db_file());
+        assert_eq!(std::fs::read_to_string(&opened).unwrap(), "history");
+        assert!(
+            !paths.superseded_db_file().exists(),
+            "the old file must not be left behind as a second, stale history"
+        );
+    }
+
+    /// The sidecars matter more than they look: a WAL holds committed transactions that
+    /// have not been checkpointed into the main file, so moving the database without it
+    /// silently discards the most recent exports — the ones a user would notice first.
+    #[test]
+    fn the_write_ahead_log_travels_with_the_database() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = split_paths(root.path());
+        write(&paths.superseded_db_file(), "history");
+        write(&with_suffix(&paths.superseded_db_file(), "-wal"), "recent");
+        write(&with_suffix(&paths.superseded_db_file(), "-shm"), "shared");
+
+        let opened = migrated_db_file(&paths);
+
+        assert_eq!(
+            std::fs::read_to_string(with_suffix(&opened, "-wal")).unwrap(),
+            "recent"
+        );
+        assert!(with_suffix(&opened, "-shm").is_file());
+    }
+
+    /// Two databases means the new one is authoritative: it is the one every version
+    /// since the move has been writing to.
+    #[test]
+    fn an_existing_database_at_the_new_path_is_never_overwritten() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = split_paths(root.path());
+        write(&paths.superseded_db_file(), "old");
+        write(&paths.db_file(), "current");
+
+        let opened = migrated_db_file(&paths);
+
+        assert_eq!(opened, paths.db_file());
+        assert_eq!(std::fs::read_to_string(&opened).unwrap(), "current");
+    }
+
+    #[test]
+    fn nothing_to_move_returns_the_new_path_and_creates_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = split_paths(root.path());
+
+        let opened = migrated_db_file(&paths);
+
+        assert_eq!(opened, paths.db_file());
+        assert!(!opened.exists(), "an absent database is not created here");
+    }
+
+    /// Windows and macOS: one directory, so there is nothing to move and the function is
+    /// an immediate no-op rather than a rename onto itself.
+    #[test]
+    fn a_layout_with_one_directory_leaves_the_database_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let mut paths = split_paths(root.path());
+        paths.data_dir = paths.settings_dir.clone();
+        write(&paths.db_file(), "history");
+
+        let opened = migrated_db_file(&paths);
+
+        assert_eq!(opened, paths.superseded_db_file());
+        assert_eq!(std::fs::read_to_string(&opened).unwrap(), "history");
     }
 
     #[test]

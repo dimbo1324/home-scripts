@@ -30,6 +30,14 @@ pub(crate) struct Paths {
     pub settings_file_exists: bool,
     pub database: String,
     pub database_exists: bool,
+    /// Set only while a database from before the 2026-09-06 move is still sitting in the
+    /// old place, so `database` above names a file that does not exist yet.
+    ///
+    /// An added field rather than a changed one: a consumer of `doctor --json` that has
+    /// never heard of it reads exactly what it read before. It disappears — as `null` —
+    /// the moment the database is opened, because opening it performs the move.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub database_superseded: Option<String>,
     pub user_profiles_file: String,
     pub user_profiles_file_exists: bool,
     pub(crate) model_limits_file: String,
@@ -58,6 +66,7 @@ fn build() -> Result<DoctorReport> {
     let app_paths = AppPaths::resolve()?;
     let settings_file = app_paths.settings_file();
     let database = app_paths.db_file();
+    let superseded = Some(app_paths.superseded_db_file()).filter(|old| *old != database);
     let user_profiles_file = app_paths.user_profiles_file();
     let model_limits_file = app_paths.model_limits_file();
 
@@ -76,6 +85,12 @@ fn build() -> Result<DoctorReport> {
             settings_file: settings_file.display().to_string(),
             database_exists: database.is_file(),
             database: database.display().to_string(),
+            // `doctor` is read-only by contract, so it reports the pending move rather
+            // than performing it. Without this a user upgrading on Linux would be told a
+            // path, look there, and find nothing.
+            database_superseded: superseded
+                .filter(|path| path.is_file())
+                .map(|path| path.display().to_string()),
             user_profiles_file_exists: user_profiles_file.is_file(),
             user_profiles_file: user_profiles_file.display().to_string(),
             model_limits_file_exists: model_limits_file.is_file(),
@@ -129,6 +144,13 @@ fn print_human(report: &DoctorReport) {
     ] {
         let mark = if exists { "present" } else { "absent" };
         output::line(format!("  {label:<13} {path} ({mark})"));
+    }
+
+    if let Some(superseded) = &report.paths.database_superseded {
+        output::line(format!(
+            "  {:<13} {superseded} (moves here on first use)",
+            "history (old)"
+        ));
     }
 
     output::line("");

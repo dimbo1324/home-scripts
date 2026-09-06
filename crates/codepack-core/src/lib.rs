@@ -19,8 +19,8 @@ pub use classify::{
 };
 pub use error::{CoreError, Result};
 pub use paths::{
-    AppPaths, DestinationError, UnsafeRelativePath, canonicalize_existing, relative_from_stored,
-    resolve_prospective, safe_join, validate_destination_outside,
+    AppPaths, DestinationError, UnsafeRelativePath, canonicalize_existing, migrated_db_file,
+    relative_from_stored, resolve_prospective, safe_join, validate_destination_outside,
 };
 pub use progress::{
     LogEvent, LogLevel, ProgressEvent, ProgressReceiver, ProgressSender, progress_channel,
