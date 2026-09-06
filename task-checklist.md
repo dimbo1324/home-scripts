@@ -1,64 +1,60 @@
 # Task Checklist
 
-**Task:** Return macOS and Linux to the supported set, and close Q21 — the `cargo xtask
-gate` failure on both Unix runners whose cause had never been found.
+**Task:** Bring codepack to a release — version 2.0.0, working on Windows 10 and 11.
+Finish what is unfinished, re-run the tests, make every document accurate, and produce a
+fresh installer.
 
 **Date:** 2026-09-06
-**Branch:** feat/cross-platform-return
+**Branch:** feat/cross-platform-return → main
 
-Owner instruction, 2026-09-06: "начинай кроссплатформенность". The stated goal behind it
-is that the product runs on the owner's team's machines, not only the owner's.
-
-**Written retrospectively**, part-way through the work, which the protocol says to do
-first. The reason is not a good one — the branch grew out of the preceding owner-decision
-task rather than starting as its own — and the honest record is worth more than a
-back-dated file. Everything below is marked from what actually happened.
+Owner instruction, 2026-09-06: bring the project to a logical conclusion so it works on
+Windows 10/11; finish the unfinished business logic and tests; re-run the tests; update
+all the documentation; produce an up-to-date `.exe`. Further features come after.
 
 ## Preparation
 
-- [+] Read the 2026-09-06 owner decisions in `docs/__arch__/open-questions.md`
-- [+] Establish what "switched off" actually meant in code (`TODO(cross-platform)` sweep)
+- [ ] Survey what is genuinely unfinished, rather than assuming (stub sweep, CLI/UI
+      inventory, version strings, existing bundle)
+- [ ] Decide the version number and what a 2.0.0 does *not* claim
 
 ## Implementation
 
-- [+] Restore `codepack-core::paths`: `Os::{Mac,Linux}`, `current_os()`, `layout()`,
-      `resolve_base_dirs()`, `home_dir_from_env()`, and the two BLUEPRINT §D.4 tests
-- [+] Restore the three-runner CI matrix and the Tauri Linux dependency step
-- [+] Make a failing gate diagnosable from outside: an annotation naming the failed
-      section, one per failing test, and the test's own output as the reason
-- [+] `--no-fail-fast`, so one round names every failure instead of one crate's worth
-- [+] **Q21 root cause**: `safe_join` accepted a Windows-shaped path on Unix, because
-      `Path::components` splits on a backslash only on Windows. Fixed in the check, not
-      the test — the input arrives from archives and other people's git trees
-- [+] `find_on_path` searched only Windows-style names; no formatter resolved on macOS or
-      Linux, silently. Per-platform search, executable bit on Unix
-- [+] `05_git_deep.txt` printed libgit2's absolute `workdir()` past
-      `disclose_absolute_paths`; routed through `disclosed_source_root()`
-- [+] The bundle-wide sweep searched two spellings of a path, not three, and named only
-      the file. Third spelling added; it now names the offending line
+- [ ] Version `2.0.0-dev` → `2.0.0` everywhere it is written, including the excluded
+      `codepack-ai-api` and the frontend package
+- [ ] CI: the four actions GitHub is force-migrating off Node 20
+- [ ] Fix whatever the sweep finds genuinely half-done and reachable on Windows
 
 ## Verification
 
-- [+] Full `cargo xtask gate` green locally (Windows), all ten sections
-- [+] CI green on `ubuntu-latest`, `macos-latest` and `windows-latest` (run 34034377909)
-- [+] Every fix carries a regression test that fails on the platform that had the defect
-- [-] No local Unix run: Docker Desktop's daemon was not running and there is no WSL
-      distro on this machine. Verification of the Unix side is CI's, which is why the
-      annotations mattered
+- [ ] `cargo xtask gate` green — all ten sections
+- [ ] `cargo xtask ai-api` green — the excluded crate the gate cannot see
+- [ ] CI green on all three runners
+- [ ] The installer builds, and the built app reports the new version
+
+## Documentation
+
+- [ ] `README.md` — install, version, what a release does and does not include; the stale
+      "checksums planned but not done" claim (`SHA256SUMS.txt` is produced today)
+- [ ] `docs/architecture/overview.md` — state of the system at 2.0.0
+- [ ] `docs/__arch__/ROADMAP.md` — §1 statuses and the S14 status line
+- [ ] `docs/__arch__/open-questions.md` — the release decision and what it defers
 
 ## Completion
 
-- [+] `ROADMAP.md` §1 and the B.4 row; `open-questions.md` Q21 row and a resolution section
-- [+] `.ai/project/11-commands.md`, `15-command-reference.md`, `.ai/CHANGELOG.md`, `AGENTS.md`
-- [+] Final report to the owner
-- [-] Not merged to `main` and not published: the owner asked for the work, not for a
-      release. Awaiting an explicit instruction
+- [ ] Merge to `main` fast-forward, push
+- [ ] Build the installer from `main`, verify the checksum file
+- [ ] Hand the `.exe` to the owner
+- [ ] Final report, including everything not done
 
-## Not done, deliberately
+## Explicitly out of scope for this release
 
-- **Packaging for macOS and Linux.** `cargo xtask package` still builds only the Windows
-  NSIS installer. BLUEPRINT and `ROADMAP.md` put bundling for the other two in S14, and
-  pulling it forward was not asked for. The *code* runs on all three; the *installer*
-  does not exist for two of them.
-- **Q43** (the residual window between `symlink_metadata` and `open` in the copy guard)
-  still awaits an owner decision on taking a `libc` dependency for `O_NOFOLLOW`.
+Named here so the report cannot quietly drop them:
+
+- **Code signing and notarisation.** Needs a certificate the owner must buy; without it
+  SmartScreen keeps warning about an unknown publisher. This is S14's remaining half.
+- **macOS and Linux installers.** The code runs on all three; only Windows has a bundle.
+- **Auto-update** — Q1, an owner decision, still open.
+- **S13's API path** — preserved in the excluded `codepack-ai-api`, no UI.
+- **Q19 (Mermaid rendering), Q20 (file:line links)** — each needs a new dependency or new
+  work in `codepack-diff`; both are owner decisions.
+- **Q43** — the residual TOCTOU window in the copy guard, awaiting a `libc` decision.
