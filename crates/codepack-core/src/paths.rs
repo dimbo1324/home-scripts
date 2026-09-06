@@ -216,6 +216,14 @@ pub struct UnsafeRelativePath {
 /// entirely, so `base.join("C:/Users/victim/x")` is simply that path, and the base the
 /// caller thought it was confining things to never applies.
 ///
+/// The same answer on every platform, which takes one extra rule. `Path::components`
+/// splits on a backslash only on Windows, so `C:\Users\victim\x` is a `Prefix` there and
+/// one ordinary *file name* on Unix — the check would refuse it on one machine and accept
+/// it on the other, for input that arrives in a ZIP somebody built on the other machine.
+/// A backslash inside a segment is therefore refused rather than reinterpreted: guessing
+/// what a Windows-shaped path meant is how a traversal check acquires a second, weaker
+/// reading of its own input.
+///
 /// Lives here rather than in `codepack-archive` because the untrusted relative path is
 /// not an archive-only shape: a ZIP member name, a part name in a bundle manifest and a
 /// path recorded in someone else's git tree are the same problem, and the third of those
@@ -227,7 +235,9 @@ pub fn safe_join(
     let mut relative = PathBuf::new();
     for component in untrusted_relative.components() {
         match component {
-            std::path::Component::Normal(part) => relative.push(part),
+            std::path::Component::Normal(part) if !part.to_string_lossy().contains('\\') => {
+                relative.push(part);
+            }
             _ => {
                 return Err(UnsafeRelativePath {
                     path: untrusted_relative.to_string_lossy().into_owned(),
@@ -368,6 +378,27 @@ mod tests {
             "/etc/passwd",
             "./a.txt",
             r"C:\Users\victim\secret.zip",
+        ] {
+            assert!(
+                safe_join(base, std::path::Path::new(hostile)).is_err(),
+                "{hostile} should not join safely"
+            );
+        }
+    }
+
+    /// Q21, in one test. The list above passed on Windows and failed on both Unix
+    /// runners from July until 2026-09-06, because only Windows reads a backslash as a
+    /// separator: on Unix the drive path is one perfectly ordinary file name. The answer
+    /// must not depend on who is reading — a ZIP written on Windows gets opened on Linux,
+    /// which is exactly when this check earns its keep.
+    #[test]
+    fn a_windows_shaped_path_is_refused_on_every_platform() {
+        let base = std::path::Path::new("/base");
+        for hostile in [
+            r"C:\Users\victim\secret.zip",
+            r"..\..\escape.txt",
+            r"a\..\..\escape.txt",
+            r"\\server\share\x",
         ] {
             assert!(
                 safe_join(base, std::path::Path::new(hostile)).is_err(),

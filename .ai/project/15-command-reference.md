@@ -97,18 +97,30 @@ not maintained. Run it when touching that crate, and before finishing stage S13.
 formatting *is* covered by `cargo xtask fmt` and by the gate's format step, because
 formatting compiles nothing.
 
+## Reading a red CI run
+
+A step's log needs admin rights on the repository; a workflow annotation is public. That
+gap is why Q21 — the Unix gate failure — sat undiagnosed from July to 2026-09-06. So a
+failing gate annotates the section that failed, and the `tests` section annotates every
+failing test by name (`--no-fail-fast`, so one round names them all). Read them from the
+run's check-runs, and do not remove them to tidy the output.
+
 ## Platform notes
 
-Target today: **Windows 10/11** — but macOS and Linux are back in the plan as of the
-owner decision 2026-09-06, and the switched-off code below is what has to come back. See
-`docs/__arch__/open-questions.md` for that decision and for the superseded 2026-07-26
-one, and Q21 for what must be re-diagnosed before the two platforms return.
+Target: **Windows 10/11, macOS and Linux**, as of the owner decision 2026-09-06, which
+reversed the 2026-07-26 narrowing to Windows alone. The switched-off code came back with
+it; `docs/__arch__/open-questions.md` holds both decisions and the Q21 history.
 
 - Windows: long paths and antivirus interfere with temporary directories; prefer a
   repository-local temp directory in tests.
-- Switched-off cross-platform code is **commented with `TODO(cross-platform)`**, never
-  deleted — grep that marker to find everything that must return together.
-  `codepack-core::paths` is the only domain crate affected.
+- No `TODO(cross-platform)` marker survives in source; the 2026-07-26 narrowing left
+  only documented history behind it. If a platform ever has to be switched off again,
+  comment the code with that marker rather than deleting it — that is what made the
+  return a day's work instead of a rewrite.
+- Write the platform-independent check, not the one your machine agrees with. A path from
+  an archive or someone else's git tree is read with `Path::components`, which splits on a
+  backslash only on Windows — Q21 was one traversal test that had been passing on Windows
+  and failing on both Unix runners since July for exactly that reason.
 - Test helpers under `#[cfg(unix)]` stay: they do not compile on Windows, so they cost
   nothing there, and they carry the invariant I7 symlink coverage.
 - The Rust toolchain is pinned in `rust-toolchain.toml`; do not bypass it. Node and pnpm

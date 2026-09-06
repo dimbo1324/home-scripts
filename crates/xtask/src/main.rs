@@ -68,12 +68,17 @@ fn run(root: &Path, program: &str, args: &[&str]) -> bool {
 /// Capturing means the output arrives at the end rather than streaming. That is a real
 /// cost and it is why only this section pays it: the test run is the one whose failure is
 /// a list of names rather than a single message.
+///
+/// `--no-fail-fast` for the same reason. Without it cargo stops at the first failing test
+/// binary, so a red run names one crate's failures and hides the rest — and each CI round
+/// then reveals exactly one crate's worth. When a round costs a push and a wait, the list
+/// has to be complete the first time.
 fn run_tests(root: &Path) -> Result<(), String> {
     println!("\n=== tests ===");
-    println!("$ cargo test --workspace");
+    println!("$ cargo test --workspace --no-fail-fast");
 
     let output = Command::new("cargo")
-        .args(["test", "--workspace"])
+        .args(["test", "--workspace", "--no-fail-fast"])
         .current_dir(root)
         .output()
         .map_err(|error| format!("failed to launch `cargo`: {error}"))?;

@@ -489,8 +489,8 @@ the part that applies to every task.
   unformatted frontend code through.
 - The `scripts/` test suite runs in the full gate (not `--quick`), same skip-or-fail rule.
   It guards a tool that deletes files, so "runs nowhere" is not an option.
-- CI runs `windows-latest` only (owner decision 2026-07-26); the other legs are commented
-  out in `.github/workflows/ci.yml`, not deleted.
+- CI runs all three OS legs independently (owner decision 2026-09-06): a green Windows leg
+  never hides a red Unix one. Reading a red one: `15-command-reference.md`.
 
 ---
 

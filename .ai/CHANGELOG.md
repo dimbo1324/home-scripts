@@ -8,6 +8,26 @@ Format: date, what changed, why, who decided. Newest first.
 
 ---
 
+### 2026-09-06 — Q21 has a name, and the platform notes stop hedging
+
+**What changed.** `11-commands.md` now states plainly that CI runs all three OS legs
+independently, and points at `15-command-reference.md` for how to read a red one — a new
+section there explaining that a step's log needs admin rights on the repository while a
+workflow annotation does not, which is why the gate annotates the failing section and
+every failing test by name. The platform note stops calling Windows the target and stops
+describing `TODO(cross-platform)` code that no longer exists; it gains one rule instead:
+write the platform-independent check, not the one your own machine agrees with.
+
+**Why.** Q21 — "the Unix gate fails, cause unknown" — had been open since July because the
+failure was unreadable from outside, not because it was hard. Once the annotations were
+added it took one run to name it: a single traversal test, failing on both Unix runners
+because `Path::components` splits on a backslash only on Windows. A rule module that still
+described the switched-off state would have sent the next session looking for markers that
+are gone.
+
+**Who decided.** Assistant, under `08-rules-evolution.md`: correcting a factually false
+module and recording a constraint the owner's 2026-09-06 cross-platform decision implies.
+
 ### 2026-09-06 — no workspace crate reaches the network, and cross-platform is back
 
 **What changed.** `12-domain-rules.md` and `10-project-map.md` both said network access was
