@@ -1,88 +1,71 @@
 # Task Checklist
 
-**Task:** Bring codepack to a release — version 2.0.0, working on Windows 10 and 11.
-Finish what is unfinished, re-run the tests, make every document accurate, and produce a
-fresh installer.
+**Task:** Make codepack install and behave on Linux the way it does on Windows — the
+seven items of the 2026-09-06 audit, in order.
 
 **Date:** 2026-09-06
-**Branch:** feat/cross-platform-return → main
+**Branch:** feat/linux-distribution
 
-Owner instruction, 2026-09-06: bring the project to a logical conclusion so it works on
-Windows 10/11; finish the unfinished business logic and tests; re-run the tests; update
-all the documentation; produce an up-to-date `.exe`. Further features come after.
+Owner instruction, 2026-09-06: work through audit items 1–7 in order, unhurried, with
+intermediate commits.
 
-## Preparation
+## The constraint that shapes this work
 
-- [+] Survey what is genuinely unfinished, rather than assuming (stub sweep, CLI/UI
-      inventory, version strings, existing bundle)
-- [+] Decide the version number and what a 2.0.0 does *not* claim
+**There is no Linux machine here.** Docker Desktop's daemon is not running and there is
+no WSL distribution; the host is Windows 11. Every Linux claim in this task is therefore
+verified on CI or not verified at all, and the checklist says which. Where a step cannot
+be proven, it is marked `-` with the reason, never `+` on the strength of the code
+looking right.
 
-## Implementation
+## 1. AppImage, and `cargo xtask package` on Linux
 
-- [+] Version `2.0.0-dev` → `2.0.0` everywhere it is written, including the excluded
-      `codepack-ai-api` and the frontend package
-- [+] CI: the four actions GitHub is force-migrating off Node 20
-- [+] Fix whatever the sweep finds genuinely half-done and reachable on Windows —
-      the sweep found none: no `todo!`/`unimplemented!` anywhere, all thirteen CLI
-      commands implemented, every UI page wired, `settings export|import` reaching the
-      settings screen. The product logic is complete for its scope
-- [+] **The `#[ignore]`d 50k-file perf smoke test failed: 317.7s against a 300s ceiling.**
-      Diagnosed rather than silenced. The same July commit takes 206.8s on this machine,
-      so a third of the gap is hardware; 5k against 50k scales 11.3x for a 10x file count,
-      so the scaling is linear and the defect class the test exists to catch is absent.
-      The rest is real added work — the detector, twenty-one more redacting reports, the
-      cache fingerprint. The test now measures two sizes in one run and asserts the
-      *ratio*, which is what it always claimed to check and what a single wall clock
-      cannot do; the absolute figure stays as a backstop, re-derived by the same 2x rule
-      that set the original. Every measurement and the reversal instruction are in
-      `docs/__arch__/open-questions.md` — this is a judgement call the owner can undo
+- [ ] `tauri.conf.json`: bundle targets for Linux (`deb`, `rpm`, `appimage`) beside `nsis`
+- [ ] `bundle.linux`: per-distro runtime dependencies, desktop entry metadata
+- [ ] Icons Linux themes actually ask for (256, 512)
+- [ ] `xtask package` stops hardcoding `bundle/nsis`; reports every artifact produced
+- [ ] `build-installer` script and `doctor` stop calling packaging Windows-only
+- [ ] CI proves it: a packaging job on `ubuntu-latest` that uploads the artifacts
 
-## Verification
+## 2. Unix permissions
 
-- [+] `cargo xtask gate` green — all ten sections; 1553 tests in 56 binaries, 0 failed
-- [+] `cargo xtask ai-api` green — the excluded crate the gate cannot see
-- [+] CI green on all three runners — after it caught two real races on the first merge.
-      `ubuntu` and `windows` failed while `macos` passed, which read like a platform
-      difference until the annotation carried the panic text: "table schema_version
-      already exists" on one, "table file_scan_cache already exists" on the other.
-      Different tables means a race, not a platform. Both fixed in `codepack-storage`,
-      with an eight-thread regression test run twenty times; the reasoning is in
-      `docs/__arch__/open-questions.md`
-- [+] The installer builds (`codepack_2.0.0_x64-setup.exe`, 5.8 MiB), its checksum
-      verifies with `sha256sum -c`, and the rebuilt CLI reports `codepack 2.0.0`
+- [ ] The copy step preserves the executable bit
+- [ ] The ZIP writers record Unix modes rather than defaulting every entry to 0644
+- [ ] Restore applies the recorded mode
+- [ ] Tests under `#[cfg(unix)]` for each, running on the macOS and Ubuntu legs
 
-## Documentation
+## 3. The database moves to `$XDG_DATA_HOME`
 
-- [+] `README.md` — install, version, what a release does and does not include; the stale
-      "checksums planned but not done" claim (`SHA256SUMS.txt` is produced today)
-- [+] `docs/architecture/overview.md` — state of the system at 2.0.0
-- [+] `docs/__arch__/ROADMAP.md` — §1 statuses and the S14 status line
-- [+] `docs/__arch__/open-questions.md` — the release decision and what it defers
+- [ ] `AppPaths` grows a data directory; the database and history live there on Linux
+- [ ] Existing installations migrate rather than losing their history
+- [ ] Windows and macOS layouts unchanged
+- [ ] Tests for the layout and for the migration
+
+## 4. deb and rpm as real packages
+
+- [ ] The CLI ships in the package, not only the desktop binary
+- [ ] Shell completions and a man page where a distro expects them
+- [ ] Dependencies correct for Debian/Ubuntu and for Fedora
+
+## 5. Proof that installation works
+
+- [ ] A CI job that installs the built package in a clean container and runs an export
+- [ ] `ubuntu:24.04`, `debian:12`, `fedora:41`
+
+## 6. The small Linux differences
+
+- [ ] inotify watch-descriptor exhaustion reports what to do about it
+- [ ] `xdg-utils` declared as a dependency
+- [ ] Font stack names Linux fonts before the generic fallback
+- [ ] Symlinks excluded from an export are counted where a user can see it
+
+## 7. Backslash-separated paths in artifacts (owner decision inside)
+
+- [ ] Establish exactly what breaks on Linux, with a test that fails first
+- [ ] Decide the fix with the owner: it changes an artifact contract (I5) and needs a
+      `schema_version` bump
 
 ## Completion
 
-- [+] Merged to `main` fast-forward and pushed; CI green on all three runners at `d406184`
-- [+] Installer built from `main`, checksum verified. Built twice: the first was made at
-      `7dda812`, before CI found the database races, so it was rebuilt at `d406184` and
-      the stale one withdrawn rather than left in the owner's hands
-- [+] Handed the `.exe` to the owner
-- [+] Final report, including everything not done
-
-## Explicitly out of scope for this release
-
-Named here so the report cannot quietly drop them:
-
-- **Code signing and notarisation.** Needs a certificate the owner must buy; without it
-  SmartScreen keeps warning about an unknown publisher. This is S14's remaining half.
-- **macOS and Linux installers.** The code runs on all three; only Windows has a bundle.
-- **Auto-update** — Q1, an owner decision, still open.
-- **S13's API path** — preserved in the excluded `codepack-ai-api`, no UI.
-- **Q19 (Mermaid rendering), Q20 (file:line links)** — each needs a new dependency or new
-  work in `codepack-diff`; both are owner decisions.
-- **Q43** — the residual TOCTOU window in the copy guard, awaiting a `libc` decision.
-- **The desktop tests write to the real user data directory.** `open_database()` goes
-  through `AppPaths::resolve()` with no seam for a test path, so `cargo test` mutates the
-  developer's own export history — and that is why two threads of one test binary
-  collided on one database. The race itself is fixed in `codepack-storage`; giving the
-  tests their own directory needs a path seam through several shell commands, which is a
-  refactor rather than a release step. Recorded in `docs/__arch__/open-questions.md`.
+- [ ] Full gate green; CI green on all three runners
+- [ ] Documentation updated: README install per distro, overview, ROADMAP, decisions log
+- [ ] Final report, naming everything not done and everything unverifiable from here
