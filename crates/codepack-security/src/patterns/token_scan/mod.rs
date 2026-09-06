@@ -155,6 +155,7 @@ impl Segment {
 /// borrowed slices, while the vendors whose shapes differ only by prefix can build
 /// theirs at startup without either leaking memory or repeating eleven near-identical
 /// constants.
+#[derive(Debug)]
 pub(crate) struct TokenPattern {
     pub(crate) segments: Cow<'static, [Segment]>,
     /// Compare [`Segment::Literal`] text case-insensitively. Vendor prefixes are

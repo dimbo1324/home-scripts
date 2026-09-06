@@ -19,6 +19,7 @@ use crate::patterns::token_scan::{self, CharClass, TokenPattern, prefixed};
 
 /// A named secret signature: one token shape plus the identity and severity a match
 /// reports.
+#[derive(Debug)]
 pub struct ProviderRule {
     pub rule_id: &'static str,
     pub confidence: &'static str,

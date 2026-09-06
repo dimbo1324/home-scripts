@@ -13,6 +13,7 @@ pub mod cache;
 pub mod classify;
 mod constants;
 pub mod error;
+mod fingerprint;
 pub mod patterns;
 pub mod policy;
 pub mod pseudonym;

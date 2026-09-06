@@ -28,6 +28,21 @@ use std::collections::HashMap;
 
 use crate::patterns::keyword::has_secret_assignment;
 
+/// Every entropy threshold, for [`crate::fingerprint`]. Listed here so a new one has
+/// to be added in the same file it is declared in, where the omission is visible.
+pub(crate) fn thresholds() -> [f64; 8] {
+    [
+        BASE64_MIN_LENGTH as f64,
+        BASE64_MIN_ENTROPY,
+        BASE64_STRONG_LENGTH as f64,
+        BASE64_STRONG_ENTROPY,
+        HEX_MIN_LENGTH as f64,
+        HEX_MIN_ENTROPY,
+        HEX_STRONG_LENGTH as f64,
+        HEX_STRONG_ENTROPY,
+    ]
+}
+
 const BASE64_MIN_LENGTH: usize = 20;
 const BASE64_MIN_ENTROPY: f64 = 4.0;
 const BASE64_STRONG_LENGTH: usize = 40;

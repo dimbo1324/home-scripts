@@ -30,8 +30,12 @@ use sha2::{Digest, Sha256};
 
 use crate::scan::FindingKind;
 
-/// Bump when any detector's behaviour changes — a new rule, a changed threshold, a
-/// different message. Forgetting to is how a cache serves yesterday's verdict forever.
+/// Bump when detection changes in a way [`crate::fingerprint`] cannot observe — the
+/// body of a `RiskyCodeRule::matches` function, or how the cascade weighs its evidence.
+///
+/// It used to carry the whole burden: any detector change at all had to be remembered
+/// here, and nothing checked. Now the tables fingerprint themselves and this covers only
+/// what a fingerprint genuinely cannot see (audit No. 19).
 const DETECTOR_RECIPE: &str = "codepack-security content detectors v1";
 
 /// One content-derived finding, without the file it was found in.
@@ -68,14 +72,19 @@ pub trait FileScanCache: Sync {
 
 /// The key for one file's content under the current build and options.
 ///
-/// Hex-encoded SHA-256 over the recipe, the crate version, the option bits and the raw
-/// bytes, NUL-separated so no two different inputs can be concatenated into the same
+/// Hex-encoded SHA-256 over the recipe, the detector fingerprint, the option bits and the
+/// raw bytes, NUL-separated so no two different inputs can be concatenated into the same
 /// string.
+///
+/// The fingerprint replaces `CARGO_PKG_VERSION`, which was doing nothing: the workspace
+/// version is `2.0.0-dev` and does not change between builds, so it never invalidated
+/// anything. What matters is not which build produced a verdict but which *rules* did,
+/// and that is exactly what the fingerprint is.
 pub fn cache_key(raw: &[u8], strict_token_checksums: bool) -> String {
     let mut hasher = Sha256::new();
     hasher.update(DETECTOR_RECIPE.as_bytes());
     hasher.update([0]);
-    hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
+    hasher.update(crate::fingerprint::DETECTOR_FINGERPRINT.as_bytes());
     hasher.update([0]);
     hasher.update([u8::from(strict_token_checksums)]);
     hasher.update([0]);

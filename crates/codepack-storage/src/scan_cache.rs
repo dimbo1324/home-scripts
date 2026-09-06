@@ -21,6 +21,12 @@ use rusqlite::Connection;
 use crate::error::Result;
 use crate::types::unix_timestamp;
 
+/// How many keys one `UPDATE` refreshes.
+///
+/// SQLite's default ceiling on host parameters is 999; a hundred keys per statement stays
+/// far below it while turning tens of thousands of round trips into a few hundred.
+const TOUCH_BATCH: usize = 100;
+
 /// Every entry, as `(key, findings_json)`.
 pub fn load_scan_cache(conn: &Connection) -> Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare("SELECT key, findings_json FROM file_scan_cache")?;
@@ -35,8 +41,18 @@ pub fn load_scan_cache(conn: &Connection) -> Result<Vec<(String, String)>> {
 /// Writes new entries and refreshes the stamps of the ones that were used, in one
 /// transaction.
 ///
-/// `INSERT OR REPLACE` because a key that is already there describes the same bytes
-/// under the same build: rewriting it changes no content and refreshes the stamps.
+/// An upsert that leaves `created_at` alone, not `INSERT OR REPLACE`. Replacing the row
+/// reset `created_at` to now, which made the column mean "last seen" while the schema
+/// says it means "first seen" (audit No. 19). `used_at` already carries "last seen", and
+/// pruning is keyed on it, so the old row's `created_at` was the only thing being lost.
+///
+/// The findings are still rewritten on conflict. A key covers the bytes, the detector
+/// fingerprint and the options, so the same key means the same verdict and the write is a
+/// no-op in content — but making that an assumption the storage layer enforces would turn
+/// a bug elsewhere into a stale row nothing could correct.
+///
+/// The used keys are refreshed in batches of [`TOUCH_BATCH`] rather than one statement
+/// each.
 pub fn store_scan_cache(
     conn: &mut Connection,
     new_entries: &[(String, String)],
@@ -49,15 +65,32 @@ pub fn store_scan_cache(
     let tx = conn.transaction()?;
     {
         let mut insert = tx.prepare(
-            "INSERT OR REPLACE INTO file_scan_cache (key, findings_json, created_at, used_at)
-             VALUES (?1, ?2, ?3, ?3)",
+            "INSERT INTO file_scan_cache (key, findings_json, created_at, used_at)
+             VALUES (?1, ?2, ?3, ?3)
+             ON CONFLICT(key) DO UPDATE SET
+                 findings_json = excluded.findings_json,
+                 used_at = excluded.used_at",
         )?;
         for (key, findings_json) in new_entries {
             insert.execute(rusqlite::params![key, findings_json, now])?;
         }
-        let mut touch = tx.prepare("UPDATE file_scan_cache SET used_at = ?2 WHERE key = ?1")?;
-        for key in used_keys {
-            touch.execute(rusqlite::params![key, now])?;
+
+        for batch in used_keys.chunks(TOUCH_BATCH) {
+            // The placeholder list has to match the batch, so the statement is built per
+            // batch rather than prepared once. Only the last batch differs in size, so in
+            // practice this prepares twice.
+            let placeholders = (2..batch.len() + 2)
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql =
+                format!("UPDATE file_scan_cache SET used_at = ?1 WHERE key IN ({placeholders})");
+            let mut parameters: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(batch.len() + 1);
+            parameters.push(&now);
+            for key in batch {
+                parameters.push(key);
+            }
+            tx.execute(&sql, parameters.as_slice())?;
         }
     }
     tx.commit()?;
@@ -98,6 +131,65 @@ mod tests {
             .iter()
             .map(|(key, json)| ((*key).to_string(), (*json).to_string()))
             .collect()
+    }
+
+    fn stamps(conn: &Connection, key: &str) -> (i64, i64) {
+        conn.query_row(
+            "SELECT created_at, used_at FROM file_scan_cache WHERE key = ?1",
+            [key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    /// `created_at` means "first seen", which is what the schema says and what pruning
+    /// reasoning depends on. `INSERT OR REPLACE` used to reset it on every run, quietly
+    /// turning it into a second copy of `used_at` (audit No. 19).
+    #[test]
+    fn rewriting_an_entry_keeps_the_date_it_was_first_seen() {
+        let (_dir, mut conn) = database();
+        store_scan_cache(&mut conn, &entries(&[("a", "[]")]), &[]).unwrap();
+        let (first_created, _) = stamps(&conn, "a");
+
+        // A distinguishable later stamp, written directly: `unix_timestamp()` has
+        // one-second resolution, so two calls in one test would very likely agree.
+        conn.execute(
+            "UPDATE file_scan_cache SET created_at = ?1, used_at = ?1 WHERE key = 'a'",
+            [first_created - 3600],
+        )
+        .unwrap();
+
+        store_scan_cache(&mut conn, &entries(&[("a", "[1]")]), &[]).unwrap();
+
+        let (created, used) = stamps(&conn, "a");
+        assert_eq!(created, first_created - 3600, "created_at must not move");
+        assert!(used >= first_created, "used_at must move forward");
+    }
+
+    /// Refreshing used keys is batched, so the batch boundary has to be right: a count
+    /// either side of it, and one exactly on it, must all land.
+    #[test]
+    fn every_used_key_is_refreshed_across_batch_boundaries() {
+        let (_dir, mut conn) = database();
+        let count = TOUCH_BATCH * 2 + 1;
+        let pairs: Vec<(String, String)> = (0..count)
+            .map(|index| (format!("k{index}"), "[]".to_string()))
+            .collect();
+        store_scan_cache(&mut conn, &pairs, &[]).unwrap();
+
+        conn.execute("UPDATE file_scan_cache SET used_at = 0", [])
+            .unwrap();
+        let keys: Vec<String> = pairs.iter().map(|(key, _)| key.clone()).collect();
+        store_scan_cache(&mut conn, &[], &keys).unwrap();
+
+        let stale: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM file_scan_cache WHERE used_at = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale, 0, "every key in every batch must be refreshed");
     }
 
     #[test]

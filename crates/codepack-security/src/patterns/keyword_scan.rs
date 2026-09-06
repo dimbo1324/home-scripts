@@ -80,6 +80,16 @@ pub(crate) static ASSIGNMENT_ROOTS: LazyLock<Vec<KeywordRoot>> = LazyLock::new(|
         .collect()
 });
 
+/// Every keyword root the crate knows, for [`crate::fingerprint`].
+///
+/// The union rather than either set: the fingerprint's job is to notice *any* change to
+/// what the detectors look for, so it must see the assignment-only roots too.
+pub(crate) fn every_root() -> Vec<KeywordRoot> {
+    let mut roots: Vec<KeywordRoot> = SCAN_ROOTS.clone();
+    roots.extend(ASSIGNMENT_ROOTS.iter().copied());
+    roots
+}
+
 /// A word character, matching the `\w` the `\b` assertions were defined against.
 fn is_word_char(character: char) -> bool {
     character.is_alphanumeric() || character == '_'

@@ -14,7 +14,7 @@
 //! Entries are small (most files contain nothing, and their entry says so in two
 //! characters), and the ceiling below bounds the rest.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use codepack_security::cache::{self, CachedFinding, FileScanCache};
@@ -31,7 +31,12 @@ pub(crate) struct SqliteScanCache {
     /// Newly scanned content, `(key, findings_json)`, waiting to be written.
     pending: Mutex<Vec<(String, String)>>,
     /// Keys that were served from `entries`, so pruning keeps what is in use.
-    used: Mutex<Vec<String>>,
+    ///
+    /// A set, not a list. The same key is served once per file with those bytes, and a
+    /// repository full of identical small files (a vendored dependency, a generated
+    /// header) hit the same key thousands of times — each one pushing a fresh 64-character
+    /// `String` that the flush then turned into its own `UPDATE` (audit No. 19).
+    used: Mutex<HashSet<String>>,
 }
 
 impl SqliteScanCache {
@@ -49,14 +54,14 @@ impl SqliteScanCache {
         Ok(Self {
             entries,
             pending: Mutex::new(Vec::new()),
-            used: Mutex::new(Vec::new()),
+            used: Mutex::new(HashSet::new()),
         })
     }
 
     /// Writes everything this run learned, then trims the cache back to its ceiling.
     pub(crate) fn flush(self, conn: &mut Connection) -> Result<()> {
         let pending = into_inner(self.pending);
-        let used = into_inner(self.used);
+        let used: Vec<String> = into_inner(self.used).into_iter().collect();
         codepack_storage::scan_cache::store_scan_cache(conn, &pending, &used)?;
         codepack_storage::scan_cache::prune_scan_cache(conn, MAX_ENTRIES)?;
         Ok(())
@@ -75,7 +80,7 @@ impl FileScanCache for SqliteScanCache {
     fn lookup(&self, key: &str) -> Option<Vec<CachedFinding>> {
         let found = self.entries.get(key)?;
         if let Ok(mut used) = self.used.lock() {
-            used.push(key.to_string());
+            used.insert(key.to_string());
         }
         Some(found.clone())
     }
