@@ -61,13 +61,25 @@ pub fn run_export_plan(
     previous_snapshot: Option<&Snapshot>,
     cancel: &CancellationToken,
 ) -> Result<PlanOutcome> {
-    let outcome = plan_export(
+    let mut outcome = plan_export(
         &paths.source_root,
         config,
         file_overrides,
         previous_snapshot,
         cancel,
     )?;
+
+    // `28_export_plan.json` names the source root too, and it goes into the bundle like
+    // every other artifact. `codepack-scanner` builds the plan and has no business
+    // knowing about a disclosure policy, so the decision is applied here, where the
+    // config already is. The field is a label — nothing reads it back as a path — so
+    // setting it changes what is written and nothing else.
+    //
+    // This was missed when the rest of audit No. 21 was done, and the bundle-wide test
+    // that should have caught it compared a raw Windows path against JSON, where every
+    // separator is doubled. The test now checks both spellings.
+    outcome.export_plan.source_root =
+        codepack_core::config::disclosed_root(config, &paths.source_root, &paths.project_name);
 
     write_export_plan_files(
         &outcome.export_plan,

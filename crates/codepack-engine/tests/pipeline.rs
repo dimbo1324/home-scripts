@@ -973,6 +973,11 @@ fn with_disclosure_off_no_artifact_names_the_machines_directories() {
     // detail that must not travel, and it appears in every one of the four fields the
     // audit named.
     let secret_path = source.path().display().to_string();
+    // JSON escapes a Windows separator, so `C:\Users\...` is written `C:\\Users\\...` and a
+    // search for the raw spelling matches nothing in any `.json` artifact. This test
+    // passed for that reason alone until it was checked against a real bundle, which
+    // still carried the path in `28_export_plan.json`. Both spellings, therefore.
+    let escaped_path = secret_path.replace('\\', "\\\\");
     let mut offenders = Vec::new();
     for entry in walkdir::WalkDir::new(&outcome.paths.staging_dir)
         .into_iter()
@@ -992,7 +997,7 @@ fn with_disclosure_off_no_artifact_names_the_machines_directories() {
             continue;
         }
         if let Ok(text) = fs::read_to_string(entry.path())
-            && text.contains(&secret_path)
+            && (text.contains(&secret_path) || text.contains(&escaped_path))
         {
             offenders.push(relative.display().to_string());
         }

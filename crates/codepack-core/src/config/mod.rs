@@ -94,11 +94,17 @@ pub struct Config {
     /// I3 sense, but a tool whose promise is safe handoff should not be the thing that
     /// discloses it.
     ///
-    /// Defaults to `true` — disclose — because the fields are part of the artifact
-    /// contract (I5) and the golden references contain today's values. Turning the
-    /// default around is an owner decision with a `schema_version` bump, recorded as Q40.
-    /// With this off the fields keep their type and their place; only the value changes,
-    /// to the project's own name.
+    /// Defaults to `false` since the owner decision of 2026-09-06 (Q40): the product is
+    /// used by a team that passes bundles between machines, and the right default for a
+    /// tool whose output leaves the computer by definition is not to name the computer.
+    /// It shipped as `true` first so that turning it on moved no artifact and no golden
+    /// reference; flipping it was the decision, not the mechanism.
+    ///
+    /// The fields keep their key and their type either way — only the value changes, to
+    /// the project's own name. That is why no `schema_version` moved: see the Q40 entry
+    /// in `docs/__arch__/open-questions.md` for the argument, which turns on the fact
+    /// that an absolute path from somebody else's machine was never resolvable by a
+    /// consumer anyway.
     pub disclose_absolute_paths: bool,
     pub ui_zoom: f64,
     pub language: String,
@@ -178,7 +184,7 @@ impl Default for Config {
             theme: DEFAULT_THEME.to_string(),
             watch_enabled: false,
             watch_clipboard_auto_update: false,
-            disclose_absolute_paths: true,
+            disclose_absolute_paths: false,
             ui_zoom: DEFAULT_UI_ZOOM,
             language: DEFAULT_LANGUAGE.to_string(),
             prompt_goals: default_prompt_goals(),
@@ -216,13 +222,30 @@ pub use io::{export_settings, import_settings, load, save};
 mod disclosure_tests {
     use super::*;
 
-    /// The default is today's behaviour, byte for byte. Every golden reference and every
-    /// existing installation depends on that: the setting exists to let a user turn the
-    /// disclosure off, not to change what an unchanged configuration produces.
+    /// The default does not name the machine (Q40, 2026-09-06). An installation that
+    /// never opens the settings hands out bundles that carry no account name, which is
+    /// the right default for a tool whose output leaves the computer by definition.
+    ///
+    /// The setting shipped as `true` first so that adding it moved no artifact; flipping
+    /// it was the owner's decision, not a side effect of building the mechanism.
     #[test]
-    fn the_default_still_writes_the_real_path() {
+    fn the_default_does_not_name_the_machine() {
         let config = Config::default();
-        assert!(config.disclose_absolute_paths);
+        assert!(!config.disclose_absolute_paths);
+        assert_eq!(
+            disclosed_root(&config, std::path::Path::new("/home/dev/work"), "work"),
+            "<work>"
+        );
+    }
+
+    /// Turning it on is still possible and still means what it says — the setting is a
+    /// choice, not a deprecation. Somebody debugging their own export wants the path.
+    #[test]
+    fn turning_it_on_writes_the_real_path() {
+        let config = Config {
+            disclose_absolute_paths: true,
+            ..Config::default()
+        };
         assert_eq!(
             disclosed_root(&config, std::path::Path::new("/home/dev/work"), "work"),
             std::path::Path::new("/home/dev/work").display().to_string()

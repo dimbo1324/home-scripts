@@ -334,6 +334,11 @@ These are held by tests, not by promises in this file:
   by the engine both front ends go through, before anything is created on disk.
 - **Secrets never reach what codepack writes.** Not a report, a log, the history, the
   database, an error message, or the text dump — never in the clear.
+- **Bundles do not name your machine.** `source_root` and the paths beside it carry the
+  project's name, not `C:\Users\<you>\...`, so a bundle handed to somebody else discloses
+  neither your account name nor the shape of your working directories. Turn
+  `disclose_absolute_paths` on if you would rather have the real paths in your own
+  bundles.
 - **Copied source files are included unchanged.** An export copies the files it selects
   byte for byte rather than rewriting them, so what keeps a credential out of the archive
   is the *selection*: safe mode excludes `.env` files, key material and similarly named
