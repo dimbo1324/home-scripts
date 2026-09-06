@@ -239,6 +239,15 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(failed) => {
             eprintln!("\nFAILED: {failed}");
+            // Under CI, say it again as a workflow annotation. The gate is one step made
+            // of ten, and a step's log is readable only with admin rights on the
+            // repository — so from outside, a failure is "exit code 1" and nothing more.
+            // That is exactly why Q21 sat unresolved: the Unix gate failed and nobody
+            // could see which of the ten sections did it. An annotation carries the name
+            // out through the public API, where anyone looking at the run can read it.
+            if std::env::var_os("CI").is_some() {
+                println!("::error title=xtask gate::the `{failed}` section failed");
+            }
             ExitCode::FAILURE
         }
     }

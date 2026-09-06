@@ -10,9 +10,11 @@
 > together".
 
 **Last revised:** 2026-08-06
-**Target platform:** Windows 10/11 only. macOS and Linux remain a product goal but are
-switched off; the disabled cross-platform code is marked `TODO(cross-platform)` rather
-than deleted, and lives in exactly one domain crate (`codepack-core::paths`).
+**Target platforms:** Windows 10/11, macOS and Linux. The 2026-07-26 narrowing to
+Windows was reversed on 2026-09-06; `codepack-core::paths` carries all three layouts
+again and CI runs the gate on all three runners. Packaging is still Windows-only — the
+NSIS installer is what `cargo xtask package` produces, and there is no macOS or Linux
+bundle yet (stage S14).
 
 ## The shape of the system
 

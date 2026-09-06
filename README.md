@@ -35,7 +35,7 @@ Everything runs **locally**. Nothing is uploaded, ever.
 
 Two ways to use it, both over the same engine — neither is a wrapper around the other.
 
-**Desktop app** (Windows 10/11). An export wizard, a preview tree where you can override
+**Desktop app.** An export wizard, a preview tree where you can override
 what goes in and what stays out, a results panel, run history, folder watching, light and
 dark themes, English and Russian interfaces switchable without a restart, and a tray icon.
 
@@ -372,5 +372,6 @@ pnpm desktop:dev                          # run the app with hot reload
 tests, dependency audit, frontend checks, the dev-script suite, agent-rule sync, and
 network isolation.
 
-Target platform is **Windows 10/11**. macOS and Linux remain a goal; the disabled code is
-marked rather than deleted.
+Targets **Windows 10/11, macOS and Linux** — the gate runs on all three. Only the
+installer is Windows-specific so far: `cargo xtask package` produces an NSIS `.exe`, and
+macOS and Linux bundles are still to come.

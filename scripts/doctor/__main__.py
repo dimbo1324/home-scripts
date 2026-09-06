@@ -134,9 +134,13 @@ def main(argv: list[str]) -> int:
     if os.name == "nt":
         ok("Windows host: every script in the catalog is usable here")
     else:
+        # These two are Windows-only because of what they *do* — NSIS packaging and the
+        # Windows dev run — not because the product is. The 2026-07-26 decision that
+        # narrowed the build to Windows was reversed on 2026-09-06; saying otherwise here
+        # would tell a colleague on Linux that the whole product is not for them.
         for name in config["windows_only_scripts"]:
-            warn(f"{name} cannot run on {sys.platform} — the product targets Windows")
-        info("Owner decision 2026-07-26; see docs/__arch__/open-questions.md")
+            warn(f"{name} is Windows-only and cannot run on {sys.platform}")
+        info("Everything else in the catalog works here; see docs/__arch__/open-questions.md")
 
     heading("verdict")
     if missing_required:
