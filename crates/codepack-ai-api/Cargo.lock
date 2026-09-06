@@ -301,7 +301,7 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "codepack-ai"
-version = "2.0.0-dev"
+version = "2.0.0"
 dependencies = [
  "codepack-core",
  "serde",
@@ -311,7 +311,7 @@ dependencies = [
 
 [[package]]
 name = "codepack-ai-api"
-version = "2.0.0-dev"
+version = "2.0.0"
 dependencies = [
  "codepack-ai",
  "codepack-tokens",
@@ -324,7 +324,7 @@ dependencies = [
 
 [[package]]
 name = "codepack-core"
-version = "2.0.0-dev"
+version = "2.0.0"
 dependencies = [
  "crossbeam-channel",
  "serde",
@@ -336,7 +336,7 @@ dependencies = [
 
 [[package]]
 name = "codepack-tokens"
-version = "2.0.0-dev"
+version = "2.0.0"
 dependencies = [
  "serde",
  "serde_json",

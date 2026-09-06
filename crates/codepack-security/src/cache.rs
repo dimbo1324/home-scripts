@@ -77,9 +77,9 @@ pub trait FileScanCache: Sync {
 /// string.
 ///
 /// The fingerprint replaces `CARGO_PKG_VERSION`, which was doing nothing: the workspace
-/// version is `2.0.0-dev` and does not change between builds, so it never invalidated
-/// anything. What matters is not which build produced a verdict but which *rules* did,
-/// and that is exactly what the fingerprint is.
+/// version is one value for a whole release and does not change between builds, so it
+/// never invalidated anything. What matters is not which build produced a verdict but
+/// which *rules* did, and that is exactly what the fingerprint is.
 pub fn cache_key(raw: &[u8], strict_token_checksums: bool) -> String {
     let mut hasher = Sha256::new();
     hasher.update(DETECTOR_RECIPE.as_bytes());

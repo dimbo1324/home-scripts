@@ -28,6 +28,7 @@ Everything runs **locally**. Nothing is uploaded, ever.
 - [Guarantees](#guarantees)
 - [Documentation](#documentation)
 - [Developing](#developing)
+- [Changelog](CHANGELOG.md)
 
 ---
 
@@ -57,16 +58,27 @@ a manifest describing all of it.
 
 ## Install
 
+**Current release: 2.0.0** (2026-09-06). See [CHANGELOG.md](CHANGELOG.md).
+
 Build the installer from the repository:
 
 ```bash
 cargo xtask package
 ```
 
-The NSIS `.exe` lands in `target/release/bundle/nsis/`.
+The NSIS `.exe` and a `SHA256SUMS.txt` beside it land in `target/release/bundle/nsis/`.
+Verify the download before running it:
 
-The build is **not code-signed yet**, so Windows SmartScreen will warn about an unknown
-publisher. Signing, notarisation, checksums and auto-update are planned but not done.
+```bash
+sha256sum -c SHA256SUMS.txt
+```
+
+The build is **not code-signed**, so Windows SmartScreen warns about an unknown publisher
+— a checksum proves the file arrived intact, not who made it, and only a certificate says
+the second thing. Signing, notarisation and auto-update are not done.
+
+Windows is the only platform with an installer. The code, the tests and the quality gate
+run on macOS and Linux too; those bundles are still to come.
 
 For the command line only:
 
@@ -328,8 +340,9 @@ against. Pin `ref:` to a commit for reproducible runs.
 
 These are held by tests, not by promises in this file:
 
-- **Privacy is absolute.** No crate reaches the network except the explicit, user-initiated
-  AI integration. A quality-gate step reads every manifest and fails the build otherwise.
+- **Privacy is absolute.** **No** crate in this workspace reaches the network — not even
+  the AI integration, whose HTTP client lives in a package excluded from the build. A
+  quality-gate step reads every manifest and fails the build otherwise.
 - **The source is immutable.** An export never writes inside the folder it reads — refused
   by the engine both front ends go through, before anything is created on disk.
 - **Secrets never reach what codepack writes.** Not a report, a log, the history, the
@@ -358,6 +371,7 @@ The full registry, with the reasoning behind each one, is in
 |---|---|
 | [docs/architecture/overview.md](docs/architecture/overview.md) | What is actually built, and how the pieces fit |
 | [docs/architecture/invariants.md](docs/architecture/invariants.md) | What must never break, and why |
+| [CHANGELOG.md](CHANGELOG.md) | What changed in each release |
 
 ## Developing
 

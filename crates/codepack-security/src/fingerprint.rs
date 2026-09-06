@@ -5,8 +5,8 @@
 //! [`crate::cache::cache_key`] has to change whenever detection changes, or a file
 //! already in the cache keeps answering with the old, weaker verdict — the improvement
 //! ships and silently does nothing. That used to rest on two things that do not work: a
-//! hand-bumped string constant, and `CARGO_PKG_VERSION`, which in this workspace is
-//! `2.0.0-dev` and does not move between builds. In practice a detector change had to be
+//! hand-bumped string constant, and `CARGO_PKG_VERSION`, which is one value for a whole
+//! release and does not move between builds. In practice a detector change had to be
 //! remembered by a person, every time.
 //!
 //! Invariant I9 protects the detector's *thresholds*; nothing protected the fact that new
