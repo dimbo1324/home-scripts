@@ -63,16 +63,6 @@ pub fn should_run(profile: &str, profiles: &[&str]) -> bool {
     profile == "full" || profiles.contains(&profile)
 }
 
-/// Legacy `orchestrator._normalise_profile`: an unrecognized profile string falls back
-/// to the default rather than running nothing.
-pub fn normalise_profile(profile: &str) -> &str {
-    if codepack_core::config::EXPORT_PROFILES.contains(&profile) {
-        profile
-    } else {
-        codepack_core::config::DEFAULT_EXPORT_PROFILE
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,11 +77,5 @@ mod tests {
     fn listed_profile_runs_unlisted_does_not() {
         assert!(should_run("quick", FILE_STATISTICS_TXT));
         assert!(!should_run("minimal", FILE_STATISTICS_TXT));
-    }
-
-    #[test]
-    fn normalise_profile_falls_back_to_default_for_unknown_values() {
-        assert_eq!(normalise_profile("bogus"), "full");
-        assert_eq!(normalise_profile("quick"), "quick");
     }
 }

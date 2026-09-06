@@ -52,7 +52,7 @@ question appear. No `codepack-*` crate knows about Tauri or the frontend
 | `codepack-archive` | Archive building and restore. Two entry points: the export pipeline's planned, splittable, reported output, and `pack_files`, which packs a caller-named list of files into one archive. Both honour `ArchiveFormat` — ZIP by default, 7z on request, RAR reserved and refused. Extraction is path-traversal safe (invariant I7). |
 | `codepack-sanitize` | The "sterile copy": comments stripped with real tree-sitter parsers (never regex) and code reformatted by whichever formatter is found on `PATH`. Reuses the scanner's file selection, the security crate's safety filter and its redaction — never a second, less guarded path out of the project. Optionally packs the result into one archive. |
 | `codepack-engine` | The orchestrator: plan → copy → structure → git → text dump → analytics → manifest → archive. Cancellation is checked inside each step's loops, not only between steps. The only place `codepack_security::scan_project` is called in the pipeline. |
-| `codepack-ai` | The stage S13 integration. Split by the `api` feature: the offline handoff is always available, while the HTTP client and the credential store arrive only with `api`. Both front ends take the crate without default features, so neither binary links a transport — invariant I1 enforced by what is compiled, and checked by the gate. |
+| `codepack-ai` | The stage S13 integration. Split by the `api` feature: the offline handoff is always available, while the HTTP client and the credential store arrive only with `api`. Both front ends take the crate without default features, so neither binary links a transport — invariant I1 enforced by what is compiled, and checked by the gate. **The `api` half is not reachable by a user today**: no command or screen enables the feature, so `ask`, the key store and the provider client are compiled and tested but cannot be run from either binary. See "Known debt". |
 | `xtask` | The task runner and quality gate. |
 
 ## The two front ends
@@ -110,6 +110,18 @@ run id and can be cancelled.
 
 ## Known debt
 
+- **`codepack-ai`'s API half is unreachable.** `default = ["api"]` is declared, but both
+  front ends take the crate with `default-features = false`, so roughly eight hundred
+  lines — `keys`, `plan`, `provider`, the Anthropic client, and `ask` itself — are
+  compiled and unit-tested and cannot be executed by a user. The only live entry point is
+  `handoff`, which is offline by design. This matches ROADMAP's "S13 partially done", but
+  the scale is worth naming: code that no end-to-end scenario reaches degrades without
+  anyone noticing. Whether to finish S13, or move the API half into a crate outside the
+  default workspace so it stops carrying `ureq` and `keyring` through `Cargo.lock` and
+  `cargo deny`, is an owner decision — Q41.
+- **Settings import and export are implemented and unwired.**
+  `codepack_core::config::{import_settings, export_settings}` are public, tested, and
+  called by nothing: no CLI command and no screen offers either. Q42.
 - Artifact localization is still a pilot on a single report; the rest of the catalogue
   is English only.
 - Redaction labels reach `03_text_dump.txt` and the git reports — the two surfaces an
