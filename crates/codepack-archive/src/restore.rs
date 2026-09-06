@@ -189,6 +189,10 @@ fn extract_zip_inner(
                 source,
             })?;
         let member_name = zip_entry.name().to_string();
+        // Read before the entry is consumed by the copy below. Masked and applied by
+        // `crate::unix_mode::apply_extracted`, which is where the reasoning lives: this
+        // value comes out of an archive and is untrusted like every other field in one.
+        let member_mode = zip_entry.unix_mode();
 
         if Path::new(&member_name).components().count() > limits.max_depth {
             return Err(ExtractLimits::exceeded(
@@ -254,6 +258,11 @@ fn extract_zip_inner(
                 limits.max_entry_bytes.to_string(),
             ));
         }
+        // After the bytes, and after the handle is done with: a mode set before writing
+        // would be undone by nothing, but a read-only mode set first would stop the write.
+        drop(output);
+        crate::unix_mode::apply_extracted(&target, member_mode);
+
         budget.take_bytes(archive_path, written)?;
         extracted = extracted.saturating_add(1);
     }

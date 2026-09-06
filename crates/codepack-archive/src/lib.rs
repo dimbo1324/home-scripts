@@ -28,6 +28,7 @@ mod pack;
 mod plan;
 mod report;
 mod restore;
+mod unix_mode;
 
 pub use build::build_final_archives;
 pub use entry::{ArchiveEntry, classify_archive_group, collect_entries};

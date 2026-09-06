@@ -124,14 +124,21 @@ fn write_zip(
             break;
         }
         let arcname = entry.arcname.to_string_lossy().replace('\\', "/");
-        writer
-            .start_file(arcname, options)
-            .map_err(|source| ArchiveError::Zip {
+        // Opened before the member is started so its mode can be recorded in the header:
+        // without it every extracted file is 0644 and a project's scripts come back
+        // unable to run. See `crate::unix_mode`.
+        let mut source_file =
+            std::fs::File::open(&entry.path).map_err(|source| ArchiveError::Read {
                 path: entry.path.clone(),
                 source,
             })?;
-        let mut source_file =
-            std::fs::File::open(&entry.path).map_err(|source| ArchiveError::Read {
+        let member_options = match crate::unix_mode::for_member(&source_file) {
+            Some(mode) => options.unix_permissions(mode),
+            None => options,
+        };
+        writer
+            .start_file(arcname, member_options)
+            .map_err(|source| ArchiveError::Zip {
                 path: entry.path.clone(),
                 source,
             })?;

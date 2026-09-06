@@ -44,6 +44,38 @@ use codepack_security::should_skip_file_for_safety;
 use crate::error::{EngineError, Result};
 use crate::relpath::to_relative_path;
 
+/// Gives the staged copy the source file's permission bits.
+///
+/// Without this every copied file lands at whatever the process umask says, so a
+/// project's `gradlew`, `./configure` and shell scripts arrive in the bundle unable to
+/// run. Nothing on Windows notices; on Linux it is the difference between a bundle
+/// somebody can build from and one they have to repair first. The mode then travels on
+/// into the archive — see `codepack_archive`'s own `unix_mode`.
+///
+/// The owner's read and write bits are forced on top of whatever the source carried,
+/// because later steps of this same pipeline read the staged copy back: the scanner, the
+/// text dump and the archive writer all open it. A source file the running user cannot
+/// read — 0400 owned by somebody else, or 0000 — would otherwise be copied successfully
+/// and then break the step after this one. Every other bit, including the executable
+/// ones this exists for, is the source's.
+///
+/// Best effort on the `chmod` itself: a destination on a filesystem with no Unix modes
+/// refuses it, and failing a copy whose bytes are all correctly written would be the
+/// wrong answer to that.
+#[cfg(unix)]
+fn preserve_mode(source: &fs::File, destination: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = (source.metadata()?.permissions().mode() & 0o777) | 0o600;
+    let _ = fs::set_permissions(destination, fs::Permissions::from_mode(mode));
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn preserve_mode(_source: &fs::File, _destination: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Copies every file `export_plan` included into `project_dir`, applying the
 /// diff-selection filter (`include_relative_paths`) and safety-mode filter
 /// (`safe_export_mode`) on top. Never aborts on a per-file I/O error — matching
@@ -222,7 +254,8 @@ fn copy_regular_file(source: &Path, destination: &Path) -> std::io::Result<()> {
 
     let mut output = fs::File::create(destination)?;
     std::io::copy(&mut input, &mut output)?;
-    Ok(())
+    // After the bytes: a read-only mode set first would stop the write that follows it.
+    preserve_mode(&input, destination)
 }
 
 #[cfg(test)]
@@ -513,5 +546,68 @@ mod descriptor_tests {
             !destination.exists() || fs::read(&destination).unwrap().is_empty(),
             "the link target's bytes must not reach the bundle"
         );
+    }
+
+    /// The start of the chain: if the executable bit is lost here, there is nothing for
+    /// the archive to record and nothing for an extraction to restore.
+    #[cfg(unix)]
+    #[test]
+    fn an_executable_source_file_is_copied_as_an_executable_one() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("gradlew");
+        fs::write(&source, b"#!/bin/sh\nexec gradle \"$@\"\n").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let destination = dir.path().join("staged-gradlew");
+        copy_regular_file(&source, &destination).expect("an ordinary file copies");
+
+        let mode = fs::metadata(&destination).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "copied as {mode:o}");
+    }
+
+    /// And an ordinary file is not quietly made executable on the way.
+    #[cfg(unix)]
+    #[test]
+    fn a_plain_source_file_does_not_gain_the_executable_bit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("README.md");
+        fs::write(&source, b"# hello\n").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let destination = dir.path().join("staged-README.md");
+        copy_regular_file(&source, &destination).expect("an ordinary file copies");
+
+        let mode = fs::metadata(&destination).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "copied as {mode:o}");
+    }
+
+    /// A source the running user cannot read is copied — the walk found it, so this
+    /// process can — and the staged copy stays readable, because the scanner, the text
+    /// dump and the archive writer all open it again after this step.
+    #[cfg(unix)]
+    #[test]
+    fn a_staged_copy_is_always_readable_by_the_process_that_wrote_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("locked.txt");
+        fs::write(&source, b"content\n").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o000)).unwrap();
+        // Readable again only long enough to copy it: the point is the destination mode.
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o400)).unwrap();
+
+        let destination = dir.path().join("staged-locked.txt");
+        copy_regular_file(&source, &destination).expect("a readable file copies");
+
+        let mode = fs::metadata(&destination).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "staged as {mode:o}, which a later step cannot write"
+        );
+        assert!(fs::read(&destination).is_ok());
     }
 }

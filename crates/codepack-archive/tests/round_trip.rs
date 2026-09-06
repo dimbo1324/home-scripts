@@ -224,3 +224,60 @@ fn precancelled_token_yields_a_partial_not_a_complete_result() {
         "a pre-cancelled build must never report the full file count"
     );
 }
+
+/// The whole point of recording modes: a script goes into a bundle executable and comes
+/// back executable.
+///
+/// Unix only, because the bits do not exist on Windows — a bundle built there carries no
+/// mode to restore, and that is stated rather than hidden. This test is what proves the
+/// Linux half, and it runs on the `macos-latest` and `ubuntu-latest` CI legs.
+#[cfg(unix)]
+#[test]
+fn an_executable_file_survives_the_archive_and_comes_back_executable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = make_paths(temp.path(), "demo");
+    fs::create_dir_all(&paths.staging_dir).expect("mkdir staging");
+
+    write_file(
+        &paths.staging_dir,
+        "demo/gradlew",
+        b"#!/bin/sh\nexec gradle\n",
+    );
+    write_file(&paths.staging_dir, "demo/README.md", b"# Demo\n");
+    let script = paths.staging_dir.join("demo/gradlew");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let options = ArchiveOptions {
+        include_project: true,
+        part_limit_bytes: 512 * 1024 * 1024,
+        format: ArchiveFormat::Zip,
+    };
+    let cancel = CancellationToken::new();
+    let result = build_final_archives(&paths, &options, &cancel, &mut |_plan, _predicted| {})
+        .expect("build archives");
+
+    let destination = temp.path().join("restored");
+    extract_zip_safely(&result.archives[0], &destination).expect("extract");
+
+    let restored_script = destination.join("demo/gradlew");
+    let mode = fs::metadata(&restored_script)
+        .expect("stat")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o755, "gradlew came back as {mode:o} and cannot run");
+
+    // And an ordinary file is not made executable on the way through.
+    let restored_readme = destination.join("demo/README.md");
+    let readme_mode = fs::metadata(&restored_readme)
+        .expect("stat")
+        .permissions()
+        .mode();
+    assert_eq!(
+        readme_mode & 0o111,
+        0,
+        "README.md came back executable: {readme_mode:o}"
+    );
+}

@@ -41,8 +41,14 @@ pub(super) fn write(
             continue;
         };
 
+        // The member's mode, for the reason `build.rs` records at its own writer: the
+        // two write points must not differ on this either.
+        let member_options = match crate::unix_mode::for_member(&source_file) {
+            Some(mode) => options.unix_permissions(mode),
+            None => options,
+        };
         writer
-            .start_file(member_name(relative), options)
+            .start_file(member_name(relative), member_options)
             .map_err(|source| ArchiveError::Zip {
                 path: absolute.clone(),
                 source,
