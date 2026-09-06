@@ -38,6 +38,40 @@ def _git_config(root: Path, key: str) -> str | None:
     return output.strip() or None
 
 
+def _check_linux_desktop_runtime(root: Path) -> None:
+    """Warn about the runtime libraries the desktop shell needs on Linux.
+
+    Warnings, never failures: the CLI, the tests and the quality gate all work without a
+    webview, and refusing to give a verdict because a headless machine has no GTK stack
+    would make this command useless exactly where it is most often run.
+
+    `ldconfig -p` rather than `pkg-config`: the runtime library is what a built binary
+    loads, and the `-dev` package that carries the `.pc` file is not installed on a
+    machine that only runs the app.
+    """
+    listing = ""
+    if find_tool("ldconfig"):
+        code, output = capture(["ldconfig", "-p"], root, timeout=20)
+        if code == 0:
+            listing = output
+
+    if not listing:
+        info("cannot read the shared-library cache; skipping the webview check")
+    elif "libwebkit2gtk-4.1" in listing:
+        ok("WebKitGTK 4.1 present: the desktop shell can run here")
+    else:
+        warn(
+            "libwebkit2gtk-4.1 not found — the desktop shell will not start. "
+            "Debian/Ubuntu: libwebkit2gtk-4.1-0, Fedora: webkit2gtk4.1. "
+            "The CLI needs none of this."
+        )
+
+    if find_tool("xdg-open"):
+        ok("xdg-open present: 'open containing folder' will work")
+    else:
+        warn("xdg-open not found (package xdg-utils) — opening a bundle's folder will fail")
+
+
 def _check_git_settings(root: Path) -> list[str]:
     """Report git settings the scripts depend on. Returns the problems found.
 
@@ -131,16 +165,24 @@ def main(argv: list[str]) -> int:
     git_problems = _check_git_settings(root)
 
     step("platform notes")
-    if os.name == "nt":
-        ok("Windows host: every script in the catalog is usable here")
+    # Nothing in the catalog is Windows-only any more: `build-installer` bundles for the
+    # host it runs on and `dev-run` launches the shell on WebKitGTK as readily as on
+    # WebView2. The list is kept because that can change again, and a script that
+    # genuinely cannot work somewhere should say so here rather than fail halfway.
+    windows_only = config["windows_only_scripts"]
+    if os.name == "nt" or not windows_only:
+        ok(f"every script in the catalog is usable on {sys.platform}")
     else:
-        # These two are Windows-only because of what they *do* — NSIS packaging and the
-        # Windows dev run — not because the product is. The 2026-07-26 decision that
-        # narrowed the build to Windows was reversed on 2026-09-06; saying otherwise here
-        # would tell a colleague on Linux that the whole product is not for them.
-        for name in config["windows_only_scripts"]:
+        for name in windows_only:
             warn(f"{name} is Windows-only and cannot run on {sys.platform}")
         info("Everything else in the catalog works here; see docs/__arch__/open-questions.md")
+
+    if sys.platform.startswith("linux"):
+        # The two things the desktop shell needs on Linux that the Rust toolchain does
+        # not bring: the webview itself, and the helper the app opens folders with. Both
+        # are declared as package dependencies in tauri.conf.json, so this matters to
+        # somebody running from a checkout rather than to somebody installing a .deb.
+        _check_linux_desktop_runtime(root)
 
     heading("verdict")
     if missing_required:

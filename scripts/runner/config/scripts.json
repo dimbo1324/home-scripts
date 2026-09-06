@@ -37,14 +37,13 @@
     "category": "build",
     "aliases": ["run", "dev"],
     "cadence_ref": "on_demand",
-    "platforms": ["win32"],
     "summary": {
       "en": "Build the app, run it for manual testing, optionally clean up after.",
       "ru": "Собрать приложение, запустить для ручного тестирования, при желании убрать за собой."
     },
     "description": {
-      "en": "Builds the frontend bundle, then the desktop binary, then launches it and waits for you to close the window -- reporting how long the session lasted and how the app exited. The frontend is rebuilt first on purpose: the Rust binary embeds it at compile time, so a stale bundle silently produces an app without the change you meant to test. --mode release builds what users get instead of the fast debug build; --cleanup artifacts|all tidies up afterwards by delegating to clean-project. For UI iteration with hot reload, use `pnpm desktop:dev` instead.",
-      "ru": "Собирает бандл фронтенда, затем десктопный бинарь, запускает его и ждёт, пока вы закроете окно, сообщая длительность сессии и код выхода. Фронтенд пересобирается специально: бинарь встраивает его на этапе компиляции, поэтому устаревший бандл молча даст приложение без той правки, которую вы собирались проверить. --mode release собирает то, что получают пользователи, вместо быстрой debug-сборки; --cleanup artifacts|all убирает за собой, делегируя работу clean-project. Для итераций по UI с горячей перезагрузкой используйте `pnpm desktop:dev`."
+      "en": "Builds the frontend bundle, then the desktop binary, then launches it and waits for you to close the window -- reporting how long the session lasted and how the app exited. The frontend is rebuilt first on purpose: the Rust binary embeds it at compile time, so a stale bundle silently produces an app without the change you meant to test. --mode release builds what users get instead of the fast debug build; --cleanup artifacts|all tidies up afterwards by delegating to clean-project. For UI iteration with hot reload, use `pnpm desktop:dev` instead. Runs anywhere the shell does: WebView2 on Windows, WebKitGTK elsewhere.",
+      "ru": "Собирает бандл фронтенда, затем десктопный бинарь, запускает его и ждёт, пока вы закроете окно, сообщая длительность сессии и код выхода. Фронтенд пересобирается специально: бинарь встраивает его на этапе компиляции, поэтому устаревший бандл молча даст приложение без той правки, которую вы собирались проверить. --mode release собирает то, что получают пользователи, вместо быстрой debug-сборки; --cleanup artifacts|all убирает за собой, делегируя работу clean-project. Для итераций по UI с горячей перезагрузкой используйте `pnpm desktop:dev`. Работает везде, где работает оболочка: WebView2 на Windows, WebKitGTK в остальных случаях."
     },
     "examples": ["--mode release", "--cleanup artifacts", "--skip-frontend"]
   },
@@ -54,14 +53,14 @@
     "category": "build",
     "aliases": ["installer", "package", "build"],
     "cadence_ref": "before_release",
-    "platforms": ["win32"],
+    "platforms": ["win32", "linux"],
     "summary": {
-      "en": "Produce the Windows .exe installer for distribution.",
-      "ru": "Собрать Windows .exe-установщик для распространения."
+      "en": "Produce this platform's installer for distribution.",
+      "ru": "Собрать установщик под текущую платформу для распространения."
     },
     "description": {
-      "en": "Runs `cargo xtask package`, which builds the frontend, the release binary, and an NSIS installer, then reports the artifact it actually found on disk with its size. The installer uses installMode currentUser, so installing needs no administrator prompt. It is unsigned: Windows SmartScreen will warn about an unknown publisher until code signing lands in stage S14. Refuses immediately on a non-Windows host rather than failing deep inside a ten-minute release build.",
-      "ru": "Запускает `cargo xtask package`: собирает фронтенд, release-бинарь и NSIS-установщик, затем сообщает найденный на диске артефакт и его размер. Установщик использует installMode currentUser, поэтому установка не требует прав администратора. Он не подписан: Windows SmartScreen будет предупреждать о неизвестном издателе, пока подпись кода не появится на этапе S14. На не-Windows системе отказывается сразу, а не падает внутри десятиминутной release-сборки."
+      "en": "Runs `cargo xtask package`, which builds the frontend, the release binary and the host platform's packages, then reports the artifacts it actually found on disk with their sizes. On Windows that is one NSIS .exe with installMode currentUser, so installing needs no administrator prompt; on Linux it is a .deb, an .rpm and an .AppImage, the last carrying its own WebKitGTK so it runs on any distribution. Nothing is signed yet: SmartScreen warns about an unknown publisher and the Linux packages carry no GPG signature, until stage S14. On a platform with no declared bundle target it refuses immediately rather than failing deep inside a ten-minute release build.",
+      "ru": "Запускает `cargo xtask package`: собирает фронтенд, release-бинарь и пакеты под текущую платформу, затем сообщает найденные на диске артефакты и их размеры. На Windows это один NSIS .exe с installMode currentUser, поэтому установка не требует прав администратора; на Linux — .deb, .rpm и .AppImage, причём последний несёт свой WebKitGTK и работает в любом дистрибутиве. Ничего пока не подписано: SmartScreen предупреждает о неизвестном издателе, а у пакетов Linux нет GPG-подписи — это этап S14. На платформе без объявленной цели сборки отказывается сразу, а не падает внутри десятиминутной release-сборки."
     },
     "examples": []
   },

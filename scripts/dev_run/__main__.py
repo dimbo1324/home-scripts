@@ -50,19 +50,9 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="reuse the existing frontend bundle instead of rebuilding it",
     )
-    parser.add_argument(
-        "--allow-other-platform",
-        action="store_true",
-        help="attempt to run on a non-Windows host (expected to fail)",
-    )
     args = parser.parse_args(argv)
 
     root = repo_root()
-    required = config["requires_platform"]
-    if not sys.platform.startswith(required) and not args.allow_other_platform:
-        heading("dev-run — not available on this platform")
-        info(config["platform_refusal"])
-        return 1
 
     mode = modes[args.mode]
     heading(f"dev-run — {mode['label']}")
@@ -83,7 +73,10 @@ def main(argv: list[str]) -> int:
         fail(f"build failed with exit {result.returncode}")
         return result.returncode
 
-    binary = root / mode["binary"]
+    # The config names the binary without a suffix: cargo appends `.exe` on Windows and
+    # nothing elsewhere, and hardcoding one was half of why this script called itself
+    # Windows-only.
+    binary = root / (mode["binary"] + (".exe" if sys.platform.startswith("win32") else ""))
     if not binary.is_file():
         fail(f"build succeeded but {binary} is missing")
         return 1

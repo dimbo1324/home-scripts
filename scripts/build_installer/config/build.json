@@ -1,18 +1,40 @@
 {
-  "_comment": "Builds the distributable Windows installer. Every path and command line is data here so a bundler change does not become a Python change.",
-
-  "requires_platform": "win32",
-  "platform_refusal": "The installer is an NSIS .exe for Windows 10/11. The product's build scope was narrowed to Windows by owner decision 2026-07-26 (docs/__arch__/open-questions.md); macOS/Linux bundling is deferred with cross-platform support.",
+  "_comment": "Builds the distributable installer for whatever host it runs on. Every path, glob and command line is data here so a bundler change does not become a Python change.",
 
   "steps": [
     {
-      "label": "build the frontend, the release binary, and the NSIS installer",
+      "label": "build the frontend, the release binary, and the platform's installer",
       "argv": ["cargo", "xtask", "package"],
       "required": true
     }
   ],
 
-  "artifact_dir": "target/release/bundle/nsis",
-  "artifact_glob": "*-setup.exe",
-  "_artifact_note": "cargo xtask package prints this too; the script re-reads the directory so it reports what is actually on disk rather than what the build claimed."
+  "_platforms_note": "Keyed by the prefix of sys.platform. A platform absent from this table is one codepack does not bundle for yet, and the script refuses with 'refusals' rather than starting a ten-minute release build that ends inside the bundler.",
+  "platforms": {
+    "win32": {
+      "label": "Windows installer",
+      "artifacts": [{ "dir": "target/release/bundle/nsis", "glob": "*-setup.exe" }],
+      "notes": [
+        "Unsigned: Windows SmartScreen will warn about an unknown publisher. Code signing is stage S14."
+      ]
+    },
+    "linux": {
+      "label": "Linux packages",
+      "artifacts": [
+        { "dir": "target/release/bundle/deb", "glob": "*.deb" },
+        { "dir": "target/release/bundle/rpm", "glob": "*.rpm" },
+        { "dir": "target/release/bundle/appimage", "glob": "*.AppImage" }
+      ],
+      "notes": [
+        "The AppImage carries its own WebKitGTK and runs on any distribution; the .deb and .rpm rely on the distribution's own, declared in tauri.conf.json.",
+        "Unsigned: there is no GPG signature on the packages yet. Verify SHA256SUMS.txt beside them."
+      ],
+      "_optional_note": "A format missing from the build is reported, not fatal: rpm bundling needs no extra tool, but a stripped-down container can still lack what one format wants, and two packages out of three is a usable result."
+    }
+  },
+
+  "refusals": {
+    "darwin": "codepack does not bundle for macOS yet: tauri.conf.json lists nsis, deb, rpm and appimage as its bundle targets, and no dmg. The code and the tests run on macOS — only the installer is missing (stage S14)."
+  },
+  "default_refusal": "codepack has no installer for this platform. Bundle targets are declared in apps/desktop/src-tauri/tauri.conf.json."
 }

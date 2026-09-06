@@ -28,7 +28,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": ["nsis", "deb", "rpm", "appimage"],
     "publisher": "codepack",
     "copyright": "Copyright (c) 2026 codepack",
     "category": "DeveloperTool",
@@ -43,6 +43,32 @@
       "icons/icon.png",
       "icons/icon.ico"
     ],
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "libayatana-appindicator3-1",
+          "librsvg2-2",
+          "xdg-utils"
+        ],
+        "section": "devel",
+        "desktopTemplate": "linux/codepack.desktop"
+      },
+      "rpm": {
+        "depends": [
+          "webkit2gtk4.1",
+          "gtk3",
+          "libayatana-appindicator-gtk3",
+          "librsvg2",
+          "xdg-utils"
+        ],
+        "desktopTemplate": "linux/codepack.desktop"
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    },
     "windows": {
       "nsis": {
         "installMode": "currentUser",

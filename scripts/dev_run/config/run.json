@@ -1,19 +1,18 @@
 {
   "_comment": "Build once, run the app for manual testing, then tidy up. Aimed at the loop of 'change something, look at it, close it'.",
 
-  "requires_platform": "win32",
-  "platform_refusal": "Running the desktop shell needs the Windows WebView2 runtime; the product targets Windows 10/11 (owner decision 2026-07-26).",
+  "_binary_note": "Named without a suffix; the script appends .exe on Windows. The desktop shell runs on WebView2 there and on WebKitGTK elsewhere, so this script is not Windows-only — it said it was until 2026-09-06, quoting a scope decision that had already been reversed.",
 
   "modes": {
     "debug": {
       "label": "debug build (fast to compile, slow to run)",
       "build_argv": ["cargo", "build", "-p", "codepack-desktop"],
-      "binary": "target/debug/codepack-desktop.exe"
+      "binary": "target/debug/codepack-desktop"
     },
     "release": {
       "label": "release build (slow to compile, what users get)",
       "build_argv": ["cargo", "build", "--release", "-p", "codepack-desktop"],
-      "binary": "target/release/codepack-desktop.exe"
+      "binary": "target/release/codepack-desktop"
     }
   },
   "default_mode": "debug",

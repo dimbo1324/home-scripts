@@ -72,5 +72,5 @@
       "hint": "the file is tracked, so a missing one means a damaged checkout"
     }
   ],
-  "windows_only_scripts": ["build-installer", "dev-run"]
+  "windows_only_scripts": []
 }

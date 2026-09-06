@@ -110,30 +110,71 @@ pub(crate) fn package(root: &Path) -> Result<(), String> {
         &["exec", "tauri", "build"],
     )?;
 
-    let bundle = root.join("target/release/bundle/nsis");
-    match std::fs::read_dir(&bundle) {
-        Ok(entries) => {
-            println!("\ninstaller(s) in {}:", bundle.display());
-            for entry in entries.flatten() {
-                let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
-                println!(
-                    "  {} ({:.1} MiB)",
-                    entry.file_name().to_string_lossy(),
-                    size as f64 / (1024.0 * 1024.0)
-                );
-            }
-            let sums = write_checksums(&bundle)?;
-            println!("checksums: {}", sums.display());
-            Ok(())
+    report_bundles(&root.join("target/release/bundle"))
+}
+
+/// Lists what the bundler actually produced, and checksums each format's directory.
+///
+/// One directory per bundle format, named by the bundler: `nsis` on Windows, and `deb`,
+/// `rpm` and `appimage` on Linux. Naming `nsis` directly — which this did until
+/// 2026-09-06 — meant that on Linux the build would succeed and the command would then
+/// fail with "target/release/bundle/nsis is unreadable", reporting a missing installer
+/// for a build that had just produced three.
+///
+/// `SHA256SUMS.txt` stays *inside* each format's directory rather than as one file above
+/// them, because it holds bare names: `sha256sum -c` is run from the directory the file
+/// sits in, and keeping that property is worth more than having a single file.
+fn report_bundles(bundle_root: &Path) -> Result<(), String> {
+    let mut formats: Vec<PathBuf> = std::fs::read_dir(bundle_root)
+        .map_err(|error| {
+            format!(
+                "tauri build succeeded but {} is unreadable: {error}",
+                bundle_root.display()
+            )
+        })?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    formats.sort();
+
+    let mut produced = 0usize;
+    for format in &formats {
+        let mut artifacts: Vec<PathBuf> = std::fs::read_dir(format)
+            .map_err(|error| format!("cannot list {}: {error}", format.display()))?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file() && path.file_name() != Some(CHECKSUM_FILE.as_ref()))
+            .collect();
+        artifacts.sort();
+        if artifacts.is_empty() {
+            continue;
         }
-        // The build reported success, so a missing directory means the bundler wrote
-        // somewhere unexpected rather than that packaging failed. Say which, instead of
-        // claiming an installer exists.
-        Err(error) => Err(format!(
-            "tauri build succeeded but {} is unreadable: {error}",
-            bundle.display()
-        )),
+
+        println!("\n{}:", format.display());
+        for artifact in &artifacts {
+            let size = artifact.metadata().map(|meta| meta.len()).unwrap_or(0);
+            println!(
+                "  {} ({:.1} MiB)",
+                artifact.file_name().unwrap_or_default().to_string_lossy(),
+                size as f64 / (1024.0 * 1024.0)
+            );
+            produced += 1;
+        }
+        let sums = write_checksums(format)?;
+        println!("  checksums: {}", sums.display());
     }
+
+    // A build that reports success and leaves nothing behind is the case worth naming:
+    // it means the bundler wrote somewhere this does not know about, and silence here
+    // would read as "packaged fine".
+    if produced == 0 {
+        return Err(format!(
+            "tauri build succeeded but produced no artifact under {}",
+            bundle_root.display()
+        ));
+    }
+    Ok(())
 }
 
 const CHECKSUM_FILE: &str = "SHA256SUMS.txt";
@@ -268,5 +309,54 @@ mod tests {
         let missing = bundle.path().join("absent");
         let error = write_checksums(&missing).unwrap_err();
         assert!(error.contains("absent"), "{error}");
+    }
+
+    /// The Linux case this function exists for: three formats in one build, each with
+    /// its own directory, each checksummed where it sits.
+    #[test]
+    fn every_bundle_format_is_reported_and_checksummed() {
+        let root = tempfile::tempdir().unwrap();
+        for (format, artifact) in [
+            ("deb", "codepack_2.0.0_amd64.deb"),
+            ("rpm", "codepack-2.0.0-1.x86_64.rpm"),
+            ("appimage", "codepack_2.0.0_amd64.AppImage"),
+        ] {
+            let dir = root.path().join(format);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(artifact), format.as_bytes()).unwrap();
+        }
+
+        report_bundles(root.path()).expect("three formats is a successful package run");
+
+        for (format, artifact) in [
+            ("deb", "codepack_2.0.0_amd64.deb"),
+            ("rpm", "codepack-2.0.0-1.x86_64.rpm"),
+            ("appimage", "codepack_2.0.0_amd64.AppImage"),
+        ] {
+            let sums = root.path().join(format).join(CHECKSUM_FILE);
+            let body = std::fs::read_to_string(&sums).unwrap();
+            assert!(body.trim_end().ends_with(artifact), "{format}: {body:?}");
+        }
+    }
+
+    /// A bundler that reports success and writes nothing is the failure this must not
+    /// paper over — it is what "target/release/bundle/nsis is unreadable" used to be on
+    /// Linux, said badly.
+    #[test]
+    fn a_build_that_left_no_artifact_is_an_error_rather_than_a_quiet_success() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("deb")).unwrap();
+
+        let error = report_bundles(root.path()).unwrap_err();
+        assert!(error.contains("no artifact"), "{error}");
+    }
+
+    /// And a missing bundle root names itself, since that is the one case where the
+    /// build genuinely wrote somewhere unexpected.
+    #[test]
+    fn a_missing_bundle_root_is_named_in_the_error() {
+        let root = tempfile::tempdir().unwrap();
+        let error = report_bundles(&root.path().join("bundle")).unwrap_err();
+        assert!(error.contains("bundle"), "{error}");
     }
 }
