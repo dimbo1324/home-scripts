@@ -57,6 +57,78 @@ fn run(root: &Path, program: &str, args: &[&str]) -> bool {
     }
 }
 
+/// The `tests` section, with the names of whatever failed.
+///
+/// `step` would do, and did — but a failing test section under CI then reported only that
+/// the section failed. The log that holds the test names needs admin rights on the
+/// repository to read, which is the same wall that left Q21 unresolved one level up. So
+/// this one captures cargo's output, prints it through unchanged for anyone who *can* read
+/// the log, and additionally emits one annotation per failed test.
+///
+/// Capturing means the output arrives at the end rather than streaming. That is a real
+/// cost and it is why only this section pays it: the test run is the one whose failure is
+/// a list of names rather than a single message.
+fn run_tests(root: &Path) -> Result<(), String> {
+    println!("\n=== tests ===");
+    println!("$ cargo test --workspace");
+
+    let output = Command::new("cargo")
+        .args(["test", "--workspace"])
+        .current_dir(root)
+        .output()
+        .map_err(|error| format!("failed to launch `cargo`: {error}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    print!("{stdout}");
+    eprint!("{stderr}");
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    if std::env::var_os("CI").is_some() {
+        for name in failed_test_names(&stdout) {
+            println!("::error title=failing test::{name}");
+        }
+    }
+    Err("tests".to_string())
+}
+
+/// Test names from cargo's `failures:` block.
+///
+/// That block rather than the `test x ... FAILED` lines: the block is printed once per
+/// binary as a plain list, so it needs no parsing of cargo's status formatting, and it
+/// omits the tests that merely ran. A name is a line indented by four spaces inside the
+/// block; the block ends at the blank line before the result summary.
+fn failed_test_names(stdout: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut in_block = false;
+    for line in stdout.lines() {
+        if line.trim() == "failures:" {
+            // Cargo prints `failures:` twice per binary — once heading the output of each
+            // failed test, once heading the name list. Only the second is a list of bare
+            // names, and the first is followed by `---- name stdout ----` lines, which do
+            // not match the four-space rule below.
+            in_block = true;
+            continue;
+        }
+        if !in_block {
+            continue;
+        }
+        match line.strip_prefix("    ") {
+            Some(name) if !name.is_empty() && !name.starts_with('-') => {
+                let name = name.trim().to_string();
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+            _ => in_block = false,
+        }
+    }
+    names
+}
+
 fn step(root: &Path, label: &str, program: &str, args: &[&str]) -> Result<(), String> {
     println!("\n=== {label} ===");
     if run(root, program, args) {
@@ -98,7 +170,7 @@ fn gate(root: &Path, quick: bool) -> Result<(), String> {
         ],
     )?;
     if !quick {
-        step(root, "tests", "cargo", &["test", "--workspace"])?;
+        run_tests(root)?;
     }
     step(root, "deny", "cargo", &["deny", "check"])?;
     if !quick {
@@ -250,5 +322,63 @@ fn main() -> ExitCode {
             }
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Cargo's real shape, abbreviated: `failures:` appears twice per binary — once
+    /// heading each failed test's captured output, once heading the list of names. Only
+    /// the second is a list, and mistaking the first for one would annotate `---- … stdout
+    /// ----` as a test name.
+    const CARGO_OUTPUT: &str = "\
+running 3 tests
+test a_passing_one ... ok
+test a_failing_one ... FAILED
+test another_failing_one ... FAILED
+
+failures:
+
+---- a_failing_one stdout ----
+thread 'a_failing_one' panicked at src/lib.rs:10:5:
+assertion failed
+
+---- another_failing_one stdout ----
+thread 'another_failing_one' panicked at src/lib.rs:20:5:
+
+failures:
+    a_failing_one
+    another_failing_one
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored
+";
+
+    #[test]
+    fn the_failing_test_names_are_taken_from_the_name_list() {
+        assert_eq!(
+            failed_test_names(CARGO_OUTPUT),
+            vec!["a_failing_one", "another_failing_one"]
+        );
+    }
+
+    /// A green run names nothing, so a passing gate emits no annotations.
+    #[test]
+    fn a_run_with_no_failures_yields_no_names() {
+        let green = "running 2 tests\ntest one ... ok\ntest two ... ok\n\n\
+                     test result: ok. 2 passed; 0 failed; 0 ignored\n";
+        assert!(failed_test_names(green).is_empty());
+    }
+
+    /// Several test binaries in one `cargo test --workspace` run each print their own
+    /// block; every name is collected, and a name repeated across binaries is listed once.
+    #[test]
+    fn names_from_several_binaries_are_collected_without_duplicates() {
+        let two_binaries = format!("{CARGO_OUTPUT}\n{CARGO_OUTPUT}");
+        assert_eq!(
+            failed_test_names(&two_binaries),
+            vec!["a_failing_one", "another_failing_one"]
+        );
     }
 }
