@@ -661,4 +661,4 @@ File: `.ai/project/14-legacy-reference.md`
 
 File: `.ai/project/15-command-reference.md`
 
-Lookup material — per-layer commands, the Tauri working-directory trap, and Windows-only platform notes. Read this file when you need a specific command; the gate, the orchestrator, and the policies that always apply live in `11-commands.md`.
+Lookup material — per-layer commands, the Tauri working-directory trap, the platform notes, and reading a red CI run. Look here for a specific command; the gate, the orchestrator and the always-apply policies live in `11-commands.md`.

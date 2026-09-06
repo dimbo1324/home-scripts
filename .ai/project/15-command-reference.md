@@ -2,7 +2,7 @@
 
 <!-- tier: extended -->
 
-> **Essence.** Lookup material — per-layer commands, the Tauri working-directory trap, and Windows-only platform notes. Read this file when you need a specific command; the gate, the orchestrator, and the policies that always apply live in `11-commands.md`.
+> **Essence.** Lookup material — per-layer commands, the Tauri working-directory trap, the platform notes, and reading a red CI run. Look here for a specific command; the gate, the orchestrator and the always-apply policies live in `11-commands.md`.
 
 Split out of `11-commands.md` on 2026-07-26 so the compiled `AGENTS.md` stays under the
 32 KiB of project instructions Codex reads. Nothing was dropped: this is reference you
