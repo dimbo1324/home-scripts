@@ -15,7 +15,7 @@ use crate::error::ReportError;
 use crate::plugin::ReportJob;
 use crate::profile;
 use crate::reports::dependencies::parse_go_mod;
-use crate::text::{read_text_lossy, safe_read_json};
+use crate::text::{read_text_unredacted, safe_read_json};
 
 pub const JOB: ReportJob = ReportJob {
     filename: "26_dependency_intelligence.md",
@@ -125,7 +125,7 @@ fn write_dependency_intelligence_report(
 
     section(&mut out, "Go");
     if root_entry_exists(&ctx.staging_root, "go.mod") {
-        let (module, requirements) = read_text_lossy(&ctx.staging_root.join("go.mod"), None)
+        let (module, requirements) = read_text_unredacted(&ctx.staging_root.join("go.mod"), None)
             .map(|text| parse_go_mod(&text))
             .unwrap_or_default();
         out.push_str(&format!(

@@ -25,7 +25,7 @@ use crate::error::ReportError;
 use crate::graph::collect;
 use crate::plugin::ReportJob;
 use crate::profile;
-use crate::text::read_text_lossy;
+use crate::text::read_text_unredacted;
 
 pub const JOB: ReportJob = ReportJob {
     filename: "16_key_files_report.md",
@@ -131,7 +131,7 @@ fn score_file(
 
     let native = crate::paths::to_native_path(&file.relative_path);
     if codepack_scanner::should_consider_text_file(&native)
-        && let Some(text) = read_text_lossy(&staging_root.join(&native), max_bytes)
+        && let Some(text) = read_text_unredacted(&staging_root.join(&native), max_bytes)
     {
         let line_count = text.lines().count();
         if line_count >= 300 {

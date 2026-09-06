@@ -23,7 +23,7 @@ use crate::paths::path_depth;
 use crate::plugin::ReportJob;
 use crate::profile;
 use crate::reports::layout::section_rule;
-use crate::text::read_text_lossy;
+use crate::text::read_text_unredacted;
 
 pub const JOB: ReportJob = ReportJob {
     filename: "04_scripts.txt",
@@ -90,7 +90,7 @@ fn write_scripts_report(ctx: &ReportContext<'_>, output_file: &Path) -> Result<(
         .into_iter()
         .find(|name| root_entry_exists(&ctx.staging_root, name));
     match makefile_name {
-        Some(name) => match read_text_lossy(&ctx.staging_root.join(name), None) {
+        Some(name) => match read_text_unredacted(&ctx.staging_root.join(name), None) {
             Some(text) => {
                 let targets = makefile_targets(&text);
                 if targets.is_empty() {

@@ -13,7 +13,7 @@ use crate::paths::to_native_path;
 use crate::plugin::ReportJob;
 use crate::profile;
 use crate::reports::layout::SOURCE_CODE_EXTENSIONS;
-use crate::text::read_text_lossy;
+use crate::text::read_text_unredacted;
 use crate::wordscan::{CODE_MARKERS, UI_INFRA_SYMBOLS, contains_word};
 
 pub const JOB: ReportJob = ReportJob {
@@ -50,7 +50,7 @@ fn write_refactoring_opportunities_report(
         if !codepack_scanner::should_consider_text_file(&native) {
             continue;
         }
-        let Some(text) = read_text_lossy(&ctx.staging_root.join(&native), max_bytes) else {
+        let Some(text) = read_text_unredacted(&ctx.staging_root.join(&native), max_bytes) else {
             continue;
         };
 

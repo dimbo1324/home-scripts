@@ -9,7 +9,7 @@ use crate::paths::to_native_path;
 use crate::plugin::ReportJob;
 use crate::profile;
 use crate::reports::layout::section_rule;
-use crate::text::read_text_lossy;
+use crate::text::read_text_unredacted;
 use crate::wordscan::{CODE_MARKERS, find_word};
 
 pub const JOB: ReportJob = ReportJob {
@@ -38,7 +38,7 @@ fn write_todo_fixme_report(ctx: &ReportContext<'_>, output_file: &Path) -> Resul
             continue;
         }
         let path = ctx.staging_root.join(&native);
-        let Some(text) = read_text_lossy(&path, max_bytes) else {
+        let Some(text) = read_text_unredacted(&path, max_bytes) else {
             continue;
         };
         for (index, line) in text.lines().enumerate() {

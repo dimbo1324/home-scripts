@@ -18,7 +18,7 @@ use crate::paths::file_name_of;
 use crate::plugin::ReportJob;
 use crate::profile;
 use crate::reports::layout::section_rule;
-use crate::text::read_text_lossy;
+use crate::text::read_text_unredacted;
 
 pub const JOB: ReportJob = ReportJob {
     filename: "10_docker.txt",
@@ -199,7 +199,7 @@ fn write_docker_report(ctx: &ReportContext<'_>, output_file: &Path) -> Result<()
     for compose in &compose_files {
         out.push_str(&format!("\n--- Parsed services from {compose} ---\n"));
         let path = ctx.resolve(compose);
-        let Some(text) = read_text_lossy(&path, None) else {
+        let Some(text) = read_text_unredacted(&path, None) else {
             out.push_str("Could not read compose file.\n");
             continue;
         };

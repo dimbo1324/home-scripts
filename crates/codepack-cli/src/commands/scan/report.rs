@@ -68,6 +68,10 @@ pub(crate) struct HistorySummary {
     /// the payload when zero, which is an additive change and needs no schema bump.
     #[serde(skip_serializing_if = "is_zero")]
     pub skipped_unsafe_paths: usize,
+    /// True when the walk stopped because it had written as much as it is allowed to,
+    /// so "no findings" covers only the versions it managed to read.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated_by_size: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
 }

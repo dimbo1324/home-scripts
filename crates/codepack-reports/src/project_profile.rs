@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::context::{DetectedStack, ReportContext, root_entry_exists};
 use crate::error::ReportError;
 use crate::paths::{file_name_of, looks_like_test_path};
-use crate::text::{read_text_lossy, safe_read_json};
+use crate::text::{read_text_unredacted, safe_read_json};
 
 pub const PROJECT_PROFILE_SCHEMA_VERSION: u32 = 1;
 
@@ -119,7 +119,7 @@ fn detect_project_type(ctx: &ReportContext<'_>, stack: &DetectedStack) -> String
             return false;
         }
         let path = ctx.resolve(&file.relative_path);
-        match read_text_lossy(&path, Some(20_000)) {
+        match read_text_unredacted(&path, Some(20_000)) {
             Some(text) => text.contains("import tkinter") || text.contains("from tkinter"),
             None => false,
         }

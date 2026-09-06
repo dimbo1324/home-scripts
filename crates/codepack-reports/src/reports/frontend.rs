@@ -12,7 +12,7 @@ use crate::paths::to_native_path;
 use crate::plugin::ReportJob;
 use crate::profile;
 use crate::reports::layout::all_directories;
-use crate::text::{read_text_lossy, safe_read_json};
+use crate::text::{read_text_unredacted, safe_read_json};
 
 pub const JOB: ReportJob = ReportJob {
     filename: "19_frontend_report.md",
@@ -133,7 +133,7 @@ fn write_frontend_report(ctx: &ReportContext<'_>, output_file: &Path) -> Result<
         if !codepack_scanner::should_consider_text_file(&native) {
             continue;
         }
-        let Some(text) = read_text_lossy(&ctx.staging_root.join(&native), max_bytes) else {
+        let Some(text) = read_text_unredacted(&ctx.staging_root.join(&native), max_bytes) else {
             continue;
         };
         for captures in component_pattern().captures_iter(&text) {

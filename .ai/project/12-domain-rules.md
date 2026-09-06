@@ -4,36 +4,35 @@ These sharpen the universal rules for this codebase. Stricter wins.
 
 ## Rust code structure
 
-- A module over roughly 600 lines (stricter than the universal 1000) becomes a
-  directory module; the public surface is preserved so external imports keep working.
+- A module over roughly 600 lines (stricter than the universal 1000) becomes a directory
+  module, keeping its public surface so external imports still work.
 - Crates know nothing about the UI: no `codepack-*` crate depends on Tauri or the
-  frontend. The core must build and test headless — the CLI depends on this.
+  frontend. The core builds and tests headless — the CLI depends on it.
 - Dependencies point strictly downward: `engine` → domain crates → `core`. Reverse and
-  circular dependencies are forbidden.
+  circular ones are forbidden.
 - Errors: `thiserror` in libraries, `anyhow` only in binaries and `xtask`.
 - `unsafe` is forbidden without an explicit owner decision and a justification in code.
-- `unwrap()` and `expect()` outside tests are allowed only where the invariant is proven
-  by an adjacent comment explaining why it cannot fail.
-- Workspace lints are configured centrally in the root `Cargo.toml`; crates inherit them
-  with `[lints] workspace = true` rather than redefining their own.
+- `unwrap()`/`expect()` outside tests need an adjacent comment proving they cannot fail.
+- Workspace lints live in the root `Cargo.toml`; crates inherit them with
+  `[lints] workspace = true` rather than redefining their own.
 
 ## Concurrency and responsiveness
 
 - Long operations (walking, hashing, scanning, archiving) parallelize with `rayon` and
-  check the cancellation token **inside** loops, not only between steps.
+  check the cancellation token **inside** loops, not just between steps.
 - Progress and log messages travel over a channel; the UI never blocks.
-- Memory must not grow linearly with file size: large files are read in a streaming
-  fashion.
+- Memory must not grow with file size: large files are read streaming.
 
 ## Domain constraints
 
 - **Network access is forbidden** in every crate except the stage S13 integration.
   Adding an HTTP client anywhere else is a violation.
 - **Symlinks are never followed** while walking — this prevents escaping the tree.
-- **Extraction is path-traversal safe**: an archive entry's target path is validated
-  before writing.
+- **Extraction is path-traversal safe**: an entry's target is validated before writing.
 - **Secrets are never logged**: a finding's text is redacted before it reaches a log,
-  report, history entry, or database row.
+  report, history entry, or database row. Raw file content reaches a report only via
+  `text::read_text_unredacted`, whose callers are declared with reasons in
+  `crates/xtask/src/report_redaction.rs` (gate-checked).
 - Constant sets (text and binary extensions, ignored directories, sensitive names and
   suffixes, safety-mode tables) are ported from the legacy version **verbatim**.
   Changing a set is a separate decision, never a side effect of refactoring.

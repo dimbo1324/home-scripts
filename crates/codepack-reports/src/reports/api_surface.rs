@@ -19,7 +19,7 @@ use crate::error::ReportError;
 use crate::paths::to_native_path;
 use crate::plugin::ReportJob;
 use crate::profile;
-use crate::text::read_text_lossy;
+use crate::text::read_text_unredacted;
 
 pub const JOB: ReportJob = ReportJob {
     filename: "18_api_surface_report.md",
@@ -87,7 +87,7 @@ fn write_api_surface_report(
         if !codepack_scanner::should_consider_text_file(&native) {
             continue;
         }
-        let Some(text) = read_text_lossy(&ctx.staging_root.join(&native), max_bytes) else {
+        let Some(text) = read_text_unredacted(&ctx.staging_root.join(&native), max_bytes) else {
             continue;
         };
 

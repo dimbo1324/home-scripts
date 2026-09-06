@@ -23,7 +23,7 @@
 //! matching `.go` file in a package directory for determinism (legacy's own
 //! `Path.glob("*.go")` order is filesystem-dependent and not itself a contract worth
 //! reproducing bit-for-bit); and every read is bounded by
-//! [`crate::text::read_text_lossy`]'s existing size/binary-sniff limits, including for
+//! [`crate::text::read_text_unredacted`]'s existing size/binary-sniff limits, including for
 //! Python files — legacy's own `_python_edges` reads the raw file unconditionally,
 //! ignoring its caller's `max_bytes_per_file` entirely, which this port does not
 //! reproduce (an unbounded read is exactly the kind of latent resource risk this
@@ -35,7 +35,7 @@ use regex::Regex;
 
 use crate::context::ReportContext;
 use crate::reports::dependencies::parse_go_mod;
-use crate::text::read_text_lossy;
+use crate::text::read_text_unredacted;
 
 const SOURCE_EXTENSIONS: &[&str] = &[
     "py", "js", "jsx", "ts", "tsx", "mjs", "cjs", "vue", "svelte", "astro", "go",
@@ -310,7 +310,7 @@ pub fn collect(ctx: &ReportContext<'_>) -> DependencyGraph {
         .iter()
         .map(|file| file.relative_path.clone())
         .collect();
-    let go_module = read_text_lossy(&ctx.staging_root.join("go.mod"), None)
+    let go_module = read_text_unredacted(&ctx.staging_root.join("go.mod"), None)
         .map(|text| parse_go_mod(&text).0)
         .unwrap_or_default();
 
@@ -321,7 +321,7 @@ pub fn collect(ctx: &ReportContext<'_>) -> DependencyGraph {
             continue;
         }
         let resolved = if file.extension == "py" {
-            read_text_lossy(&ctx.resolve(&file.relative_path), max_bytes)
+            read_text_unredacted(&ctx.resolve(&file.relative_path), max_bytes)
                 .map(|text| python_edges(&file.relative_path, &text, &known))
                 .unwrap_or_default()
         } else if !codepack_scanner::should_consider_text_file(&crate::paths::to_native_path(
@@ -329,7 +329,7 @@ pub fn collect(ctx: &ReportContext<'_>) -> DependencyGraph {
         )) {
             BTreeSet::new()
         } else {
-            match read_text_lossy(&ctx.resolve(&file.relative_path), max_bytes) {
+            match read_text_unredacted(&ctx.resolve(&file.relative_path), max_bytes) {
                 Some(text) if JS_LIKE_EXTENSIONS.contains(&file.extension.as_str()) => {
                     js_edges(&file.relative_path, &text, &known)
                 }

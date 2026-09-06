@@ -27,7 +27,7 @@ use crate::paths::path_depth;
 use crate::plugin::ReportJob;
 use crate::profile;
 use crate::reports::layout::section_rule;
-use crate::text::{read_text_lossy, safe_read_json};
+use crate::text::{read_text_unredacted, safe_read_json};
 
 pub const JOB: ReportJob = ReportJob {
     filename: "03_dependencies.txt",
@@ -173,7 +173,7 @@ fn write_dependency_report(ctx: &ReportContext<'_>, output_file: &Path) -> Resul
         out.push_str("\n--- Python requirements files ---\n");
         for file in requirements_files {
             out.push_str(&format!("\nFile: {}\n", file.relative_path));
-            match read_text_lossy(&ctx.resolve(&file.relative_path), None) {
+            match read_text_unredacted(&ctx.resolve(&file.relative_path), None) {
                 Some(text) => {
                     let lines: Vec<&str> = text
                         .lines()
@@ -198,7 +198,7 @@ fn write_dependency_report(ctx: &ReportContext<'_>, output_file: &Path) -> Resul
     if root_entry_exists(&ctx.staging_root, "go.mod") {
         out.push_str("\n--- Go modules ---\n");
         let go_mod_path = ctx.staging_root.join("go.mod");
-        let (module_name, requirements) = read_text_lossy(&go_mod_path, None)
+        let (module_name, requirements) = read_text_unredacted(&go_mod_path, None)
             .map(|text| parse_go_mod(&text))
             .unwrap_or_default();
         out.push_str(&format!(

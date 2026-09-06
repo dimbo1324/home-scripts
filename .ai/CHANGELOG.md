@@ -8,6 +8,26 @@ Format: date, what changed, why, who decided. Newest first.
 
 ---
 
+### 2026-09-06 — a report reaches raw content only through a read that says so
+
+**What changed.** `12-domain-rules.md` gains a rule: raw project file content is available
+to a report only through `codepack_reports::text::read_text_unredacted`, and every report
+that calls it must be listed with a justification in
+`crates/xtask/src/report_redaction.rs`, checked by the new `report redaction` step of
+`cargo xtask gate`. `11-commands.md`'s gate policy now names that step beside
+`network isolation`.
+
+**Why.** The previous wording — every report that quotes file content must call
+`redact_line` first — had already been broken: three reports wrote `package.json` scripts
+into artifacts unredacted (2026-09-05 audit, finding No. 2). A violation of that rule
+looks exactly like an ordinary `push_str(&format!(...))`, so review does not catch it, and
+of the reports that read files only a third called the redactor. A rule that cannot hold
+by memory becomes a check the build performs — which is what was already done for I1.
+
+**Who decided.** Claude, while working the 2026-09-05 audit (findings No. 2 and No. 20).
+Within the "may change autonomously" scope of `08-rules-evolution.md`: it adds a
+constraint and removes none.
+
 ### 2026-08-05 — a date is never taken without its moment
 
 **What changed.** New universal module `09-time-and-timestamps.md`: any fact carrying a

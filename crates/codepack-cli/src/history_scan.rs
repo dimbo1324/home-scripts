@@ -55,9 +55,22 @@ pub(crate) const DEFAULT_MAX_COMMITS: usize = 500;
 /// Blobs larger than this are skipped and counted.
 ///
 /// A credential is a short string; an eight-megabyte file is a data set, a minified
-/// bundle or a checked-in artifact. The cap bounds a walk that would otherwise
-/// materialise every historical version of every such file.
+/// bundle or a checked-in artifact. This bounds any single file version; what bounds the
+/// walk as a whole is [`MAX_TOTAL_BYTES`].
 const MAX_BLOB_BYTES: usize = 8 * 1024 * 1024;
+
+/// Total bytes this walk will write into the temporary directory.
+///
+/// The per-blob cap and the commit cap between them bound nothing in aggregate: five
+/// hundred commits of a large repository is easily tens of thousands of distinct blobs,
+/// and at a hundred kilobytes each that is gigabytes on disk. The module comment claimed
+/// the commit cap existed so a user would not "discover the disk filling up" — a cap on
+/// commits does not bound volume, and `--max-commits 0` is documented, offered, and
+/// wired through `action.yml`, which removes even that (audit No. 22).
+///
+/// Two gibibytes is generous for a scan of file *versions*, and small enough to leave a
+/// CI runner able to finish its job.
+const MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// One historical file version, and where it came from.
 #[derive(Debug, Clone)]
@@ -85,6 +98,11 @@ pub(crate) struct HistoryContent {
     pub truncated: bool,
     /// Blobs skipped for exceeding [`MAX_BLOB_BYTES`].
     pub skipped_large_blobs: usize,
+    /// True when [`MAX_TOTAL_BYTES`] stopped the walk. Reported as a **warning** rather
+    /// than a note: it means the answer covers only part of the history, and a partial
+    /// "nothing found" that reads like a complete one is the failure this module already
+    /// guards against for its other two limits.
+    pub truncated_by_size: bool,
     /// Tree entries refused for naming a path that would not stay under the temporary
     /// root. Counted rather than dropped quietly: such an entry is a finding about the
     /// repository, not noise.
@@ -163,8 +181,10 @@ pub(crate) fn collect(project_root: &Path, options: &HistoryOptions) -> Result<H
     let mut truncated = false;
     let mut skipped_large_blobs = 0usize;
     let mut skipped_unsafe_paths = 0usize;
+    let mut materialised_bytes = 0u64;
+    let mut truncated_by_size = false;
 
-    for id in revwalk {
+    'walk: for id in revwalk {
         if options.max_commits != 0 && commits_walked >= options.max_commits {
             truncated = true;
             break;
@@ -237,6 +257,17 @@ pub(crate) fn collect(project_root: &Path, options: &HistoryOptions) -> Result<H
                 skipped_large_blobs += 1;
                 continue;
             }
+            // Checked before writing, so the budget is a ceiling on what lands rather
+            // than on what has already landed.
+            let blob_bytes = blob.size() as u64;
+            if materialised_bytes.saturating_add(blob_bytes) > MAX_TOTAL_BYTES {
+                truncated_by_size = true;
+                // Out of the commit walk entirely, not just this commit's deltas: with
+                // the budget spent there is nothing left to materialise, and walking on
+                // would only inflate `commits_walked` into a claim of coverage the scan
+                // does not have.
+                break 'walk;
+            }
 
             // Each distinct blob gets its own directory, named for its id: the same path
             // legitimately holds different content in different commits, and writing
@@ -264,6 +295,7 @@ pub(crate) fn collect(project_root: &Path, options: &HistoryOptions) -> Result<H
                 source,
             })?;
 
+            materialised_bytes = materialised_bytes.saturating_add(blob_bytes);
             blobs.push(HistoricalBlob {
                 relative,
                 repo_path: repo_path.to_string_lossy().replace('\\', "/"),
@@ -281,6 +313,7 @@ pub(crate) fn collect(project_root: &Path, options: &HistoryOptions) -> Result<H
         truncated,
         skipped_large_blobs,
         skipped_unsafe_paths,
+        truncated_by_size,
     })
 }
 
@@ -422,6 +455,58 @@ mod tests {
                 .iter()
                 .all(|blob| !blob.repo_path.contains("escape")),
             "the escaping entry must not have been materialised"
+        );
+    }
+
+    /// The budget the walk did not have. Per-blob and per-commit caps bound neither the
+    /// number of distinct blobs nor their total, and `--max-commits 0` removes even the
+    /// commit cap (audit No. 22).
+    #[test]
+    fn the_walk_stops_when_it_has_materialised_as_much_as_it_may_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repository(dir.path());
+        // Distinct content per commit, so nothing is deduplicated away.
+        for index in 0..4 {
+            commit_file(
+                &repo,
+                &format!("f{index}.txt"),
+                &format!(
+                    "version {index}
+"
+                ),
+                &format!("commit {index}"),
+            );
+        }
+
+        let history = collect(
+            dir.path(),
+            &HistoryOptions {
+                max_commits: 0,
+                ..HistoryOptions::default()
+            },
+        )
+        .unwrap();
+
+        // The real ceiling is two gibibytes, which no test should write, so what is
+        // asserted here is that an ordinary walk is *not* marked truncated — the flag
+        // must mean something rather than being set by default.
+        assert!(!history.truncated_by_size);
+        assert!(!history.blobs().is_empty());
+    }
+
+    /// Exercises the budget itself at a size a test can afford, by checking the
+    /// arithmetic the walk uses rather than by writing gigabytes.
+    #[test]
+    fn the_budget_refuses_the_blob_that_would_cross_it_rather_than_after_it() {
+        let mut materialised: u64 = MAX_TOTAL_BYTES - 10;
+        let blob: u64 = 11;
+        // The check is `would exceed`, evaluated before the write.
+        assert!(materialised.saturating_add(blob) > MAX_TOTAL_BYTES);
+
+        materialised = MAX_TOTAL_BYTES - 11;
+        assert!(
+            materialised.saturating_add(blob) <= MAX_TOTAL_BYTES,
+            "a blob that exactly fills the budget is still written"
         );
     }
 

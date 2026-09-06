@@ -9,6 +9,7 @@ mod frontend;
 mod golden;
 mod hooks;
 mod network_isolation;
+mod report_redaction;
 mod scripts;
 mod sync_agents;
 
@@ -91,6 +92,11 @@ fn gate(root: &Path, quick: bool) -> Result<(), String> {
     }
     println!("\n=== agents sync ===");
     sync_agents::run(root, true).map_err(|error| format!("sync-agents: {error}"))?;
+    // Source-only, so it runs in the quick gate too: a report that starts reading raw
+    // file content looks like any other line of code, and the cost of missing one is a
+    // credential in a bundle somebody hands out.
+    println!("\n=== report redaction ===");
+    report_redaction::check(root)?;
     // Cheap and manifest-only, so it runs in the quick gate too: a crate that gains a
     // network client changes no behaviour until the day it makes a request, which is far
     // too late to notice.

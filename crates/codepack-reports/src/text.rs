@@ -15,7 +15,29 @@ use std::path::Path;
 ///
 /// Returns `None` when the file cannot be stat'd, exceeds `max_bytes`, or its first
 /// sample looks binary ([`codepack_scanner::looks_binary`]).
-pub(crate) fn read_text_lossy(path: &Path, max_bytes: Option<u64>) -> Option<String> {
+///
+/// # This returns a project's file content unredacted
+///
+/// Named so at every call site, deliberately. Invariant I3 says a secret's value must
+/// never reach a report, and that used to rest on each report's author remembering to
+/// call `redact_line` before quoting anything — a rule that had already been broken once
+/// (audit No. 2) and could not fail to be broken again (audit No. 20).
+///
+/// Reading raw is legitimate when a report *analyses* content and never quotes it:
+/// counting lines, matching a marker word, parsing a manifest's structure. It is not
+/// legitimate when any part of the text is written into an artifact — there, every value
+/// goes through [`crate::context::redact_line`] before it is written.
+///
+/// The `report redaction` step of `cargo xtask gate` enforces this: a report that reads
+/// raw must be listed, with its reason, in `crates/xtask/src/report_redaction.rs`.
+///
+/// There is deliberately no `read_text_redacted` counterpart, though the audit suggested
+/// one. `redact_line` trims each line as part of its contract, so redacting a whole file
+/// before parsing it destroys the indentation a YAML or Makefile parser depends on —
+/// tried on the Docker report, where it stopped finding services at all. Redaction
+/// therefore stays on the values a report is about to write; this function's name, and
+/// the gate, are what make an omission visible instead of invisible.
+pub(crate) fn read_text_unredacted(path: &Path, max_bytes: Option<u64>) -> Option<String> {
     let metadata = std::fs::metadata(path).ok()?;
     let size = metadata.len();
     if size == 0 {
@@ -90,7 +112,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("empty.txt");
         std::fs::write(&path, b"").unwrap();
-        assert_eq!(read_text_lossy(&path, None), Some(String::new()));
+        assert_eq!(read_text_unredacted(&path, None), Some(String::new()));
     }
 
     #[test]
@@ -98,7 +120,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("big.txt");
         std::fs::write(&path, vec![b'a'; 100]).unwrap();
-        assert_eq!(read_text_lossy(&path, Some(10)), None);
+        assert_eq!(read_text_unredacted(&path, Some(10)), None);
     }
 
     #[test]
@@ -106,7 +128,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bin.dat");
         std::fs::write(&path, [0u8, 1, 2, 3]).unwrap();
-        assert_eq!(read_text_lossy(&path, None), None);
+        assert_eq!(read_text_unredacted(&path, None), None);
     }
 
     #[test]
@@ -115,7 +137,7 @@ mod tests {
         let path = dir.path().join("hello.txt");
         std::fs::write(&path, b"hello world").unwrap();
         assert_eq!(
-            read_text_lossy(&path, None),
+            read_text_unredacted(&path, None),
             Some("hello world".to_string())
         );
     }

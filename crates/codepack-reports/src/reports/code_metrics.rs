@@ -9,7 +9,7 @@ use crate::paths::to_native_path;
 use crate::plugin::ReportJob;
 use crate::profile;
 use crate::reports::layout::{SOURCE_CODE_EXTENSIONS, section_rule};
-use crate::text::read_text_lossy;
+use crate::text::read_text_unredacted;
 
 pub const JOB: ReportJob = ReportJob {
     filename: "08_code_metrics.txt",
@@ -52,7 +52,7 @@ fn write_code_metrics_report(
             continue;
         }
         let path = ctx.staging_root.join(to_native_path(&file.relative_path));
-        let Some(text) = read_text_lossy(&path, max_bytes) else {
+        let Some(text) = read_text_unredacted(&path, max_bytes) else {
             continue;
         };
 

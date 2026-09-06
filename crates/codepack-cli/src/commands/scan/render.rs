@@ -140,6 +140,12 @@ pub(super) fn print_history_notice(report: &ScanReport) {
             history.skipped_large_blobs
         ));
     }
+    if history.truncated_by_size {
+        output::line(
+            "WARNING:   the walk stopped after materialising as much history as it is \
+             allowed to, so older file versions were NOT checked.",
+        );
+    }
     if history.skipped_unsafe_paths > 0 {
         output::line(format!(
             "WARNING:   {} tree entr(ies) named a path outside the repository and were NOT \

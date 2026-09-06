@@ -65,6 +65,7 @@ pub(crate) fn build_history_with_cancel(
         truncated: history.truncated,
         skipped_large_blobs: history.skipped_large_blobs,
         skipped_unsafe_paths: history.skipped_unsafe_paths,
+        truncated_by_size: history.truncated_by_size,
         since: args.since.clone(),
     };
 
