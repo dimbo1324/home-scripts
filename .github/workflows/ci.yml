@@ -219,10 +219,21 @@ jobs:
             echo "::error title=deb::no desktop entry in the package" >&2
             fail=1
           fi
-          if ! dpkg-deb --contents "$deb" | grep -q 'icons/hicolor/256x256'; then
-            echo "::error title=deb::no 256x256 icon in the package" >&2
-            fail=1
-          fi
+          # `128x128@2x.png` installs into a `128x128@2x` directory, not `256x256`:
+          # hicolor names a scaled directory after its base size, and Tauri follows that.
+          # So the sizes asserted here are the ones with a plainly named source file.
+          # Membership in a space-separated list rather than a regex, because `128x128`
+          # is a prefix of `128x128@2x` and a careless pattern would accept the wrong one.
+          icons=$(dpkg-deb --contents "$deb" | grep -o 'icons/hicolor/[^/]*' | sort -u | xargs)
+          for size in 128x128 512x512; do
+            case " $icons " in
+              *" icons/hicolor/$size "*) ;;
+              *)
+                echo "::error title=deb::no $size icon in the package; it installs: $icons" >&2
+                fail=1
+                ;;
+            esac
+          done
           exit $fail
 
       - name: Verify the checksums
