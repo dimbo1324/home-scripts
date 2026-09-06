@@ -169,21 +169,54 @@ pub fn copy_project(
 
 /// Copies `source` to `destination`, refusing anything that is not a regular file.
 ///
-/// The check is on the **open descriptor**, not on the path. `walk_project` already
-/// excludes symlinks, but time passes between the walk and the copy, and `fs::copy`
-/// follows a link — so a path that was a file when it was planned and is a link when it
-/// is copied puts the link's target into the bundle, possibly from outside the project.
-/// That is invariant I7 defeated by a window rather than by a mistake (audit No. 31).
+/// `walk_project` already excludes symlinks, but time passes between the walk and the
+/// copy, and `fs::copy` follows a link — so a path that was a file when it was planned
+/// and is a link when it is copied puts the link's target into the bundle, possibly from
+/// outside the project. That is invariant I7 defeated by a window rather than by a
+/// mistake (audit No. 31).
 ///
-/// Opening first and asking the descriptor what it is closes the window: the bytes that
-/// get copied are the bytes of the thing that was checked. There is no instant in between
-/// for the path to mean something else.
+/// ## What this closes, and what it does not
+///
+/// It refuses a symlink standing where a file was planned, which is the whole of the
+/// reachable attack: the walk vetted a regular file, and anything else appearing there is
+/// refused rather than copied.
+///
+/// A window remains between `symlink_metadata` and `File::open` — microseconds rather
+/// than the seconds or minutes between the walk and the copy, but not zero. Closing it
+/// completely means opening with `O_NOFOLLOW` on Unix and `FILE_FLAG_OPEN_REPARSE_POINT`
+/// on Windows, and neither flag is reachable from `std` without a `libc`-level
+/// dependency. Whether that dependency is worth the last microseconds of a local race is
+/// an owner's call, not one to make while fixing something else; it is recorded as Q43.
+///
+/// Said plainly because the previous version of this comment was not: it claimed the
+/// descriptor check was "the only form with no window", and the descriptor check could
+/// not see this case at all.
 fn copy_regular_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    // `symlink_metadata` is the one that does **not** follow a link, so this is what
+    // actually answers "is the thing at this path a symlink". It has to come first and
+    // it has to be this call: `File::open` follows a link, and the metadata of the open
+    // descriptor then describes the *target* — a regular file — so the descriptor check
+    // below cannot see a symlink to an ordinary file at all.
+    //
+    // That is not a hypothetical. This function's first version checked only the
+    // descriptor, with a comment claiming it was "the only form with no window", and it
+    // would have copied a symlink's target straight into the bundle. The `#[cfg(unix)]`
+    // test that catches it existed the whole time and had never run, because CI was
+    // Windows-only.
+    if fs::symlink_metadata(source)?.file_type().is_symlink() {
+        return Err(std::io::Error::other(
+            "not a regular file when it came to be copied; a symlink appeared where the \
+             plan saw an ordinary file",
+        ));
+    }
+
     let mut input = fs::File::open(source)?;
+    // Kept, and not redundant: it catches what the path check cannot — a directory, a
+    // FIFO, a device — and it is the one check made against the thing actually opened.
     if !input.metadata()?.file_type().is_file() {
         return Err(std::io::Error::other(
-            "not a regular file when it came to be copied; a symlink or special file \
-             appeared where the plan saw an ordinary file",
+            "not a regular file when it came to be copied; a special file appeared where \
+             the plan saw an ordinary file",
         ));
     }
 
@@ -419,6 +452,40 @@ mod descriptor_tests {
         // refused rather than copied.
         let rendered = error.to_string();
         assert!(!rendered.is_empty(), "{rendered}");
+    }
+
+    /// The same case on Windows, where creating a symlink needs Developer Mode or an
+    /// elevated shell. When it cannot be created the test says so and stops rather than
+    /// passing quietly — a skip that looks like a pass is how the Unix version of this
+    /// went unrun for weeks.
+    #[cfg(windows)]
+    #[test]
+    fn a_symlink_that_appeared_after_planning_is_refused_rather_than_followed_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside-the-project.txt");
+        fs::write(
+            &outside,
+            b"a secret from beyond the project
+",
+        )
+        .unwrap();
+
+        let planned = dir.path().join("looks-like-a-file.txt");
+        if std::os::windows::fs::symlink_file(&outside, &planned).is_err() {
+            eprintln!(
+                "skipped: this Windows host cannot create symlinks (Developer Mode off).                  The Unix test covers the same guard."
+            );
+            return;
+        }
+        let destination = dir.path().join("copied.txt");
+
+        let error = copy_regular_file(&planned, &destination)
+            .expect_err("a symlink must not be copied through");
+        assert!(error.to_string().contains("symlink"), "{error}");
+        assert!(
+            !destination.exists(),
+            "the link target's bytes must not reach the bundle"
+        );
     }
 
     /// Audit No. 31, the case that motivated the change: a symlink standing where the plan
