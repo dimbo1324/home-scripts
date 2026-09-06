@@ -30,7 +30,19 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     }
 
     let output = Command::new("cargo")
-        .args(["deny", "--format", "json", "check", "advisories"])
+        // `--log-level info` is what makes the per-advisory diagnostics appear at all.
+        // Without it `--format json` emits only a summary object, and every entry looks
+        // unmatched — which is exactly the wrong answer, since it invites deleting
+        // suppressions that are still doing their job.
+        .args([
+            "deny",
+            "--format",
+            "json",
+            "--log-level",
+            "info",
+            "check",
+            "advisories",
+        ])
         .current_dir(root)
         .output();
 

@@ -40,8 +40,7 @@ what goes in and what stays out, a results panel, run history, folder watching, 
 dark themes, English and Russian interfaces switchable without a restart, and a tray icon.
 
 **Command line** — the `codepack` binary. Eleven commands plus the MCP server, a stable
-exit-code contract,
-and `--json` on everything.
+exit-code contract, and `--json` on everything.
 
 **MCP server** — `codepack mcp`, for a coding agent rather than a person. Same engine,
 same answers, spoken over a pipe.
@@ -331,7 +330,8 @@ These are held by tests, not by promises in this file:
 
 - **Privacy is absolute.** No crate reaches the network except the explicit, user-initiated
   AI integration. A quality-gate step reads every manifest and fails the build otherwise.
-- **The source is immutable.** An export never writes inside the folder it reads.
+- **The source is immutable.** An export never writes inside the folder it reads — refused
+  by the engine both front ends go through, before anything is created on disk.
 - **Secrets never reach what codepack writes.** Not a report, a log, the history, the
   database, an error message, or the text dump — never in the clear.
 - **Copied source files are included unchanged.** An export copies the files it selects
@@ -340,7 +340,9 @@ These are held by tests, not by promises in this file:
   files. A live key inside an ordinary source file travels with that file — read the
   security report and the preview before handing a bundle to someone.
 - **Byte figures are preserved.** Token counts were added alongside, not instead.
-- **Symlinks are never followed**, and extraction is path-traversal safe.
+- **Symlinks are never followed** — while walking, while copying, and while reading a
+  bundle back — and extraction is path-traversal safe and bounded in size, depth and
+  member count.
 
 The full registry, with the reasoning behind each one, is in
 [docs/architecture/invariants.md](docs/architecture/invariants.md).
