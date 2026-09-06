@@ -22,39 +22,39 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # TODO(cross-platform): restore `ubuntu-latest` and `macos-latest` when the
-        # product targets them again. Owner decision 2026-07-26 (see
-        # `docs/__arch__/open-questions.md`): the build scope is Windows 10/11 only for
-        # now, so the other two legs are commented rather than deleted — BLUEPRINT §B.4
-        # still declares cross-platform a product goal, and Q21 records that the Unix
-        # `cargo xtask gate` failure was never root-caused before those legs were dropped.
-        #
-        #   os: [ubuntu-latest, macos-latest, windows-latest]
-        os: [windows-latest]
+        # All three again, as of the owner decision 2026-09-06: the product is used by a
+        # team on different machines, which reverses the 2026-07-26 narrowing to Windows.
+        # Q21 — the Unix `gate` failure that was never root-caused — is what this matrix
+        # exists to answer: `fail-fast: false` above means a failure on one OS still
+        # reports the other two, so the first green Windows leg does not hide anything.
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      # TODO(cross-platform): re-enable together with the `ubuntu-latest` matrix leg.
       # `codepack-desktop` is a normal cargo workspace member (BLUEPRINT §C.2), so
-      # `cargo clippy --workspace`/`cargo test --workspace` build it on every OS, not
-      # just when packaging. Tauri's Linux backend links against these system libraries
-      # via pkg-config; without them the workspace fails to compile before
-      # `cargo xtask gate` even reaches the deny check. Windows (WebView2) and macOS
-      # (Xcode Command Line Tools, preinstalled on the runner image) need nothing extra.
+      # `cargo clippy --workspace`/`cargo test --workspace` build it on every OS, not just
+      # when packaging. Tauri's Linux backend links against these system libraries via
+      # pkg-config; without them the workspace fails to compile before `cargo xtask gate`
+      # even reaches the deny check. Windows (WebView2) and macOS (Xcode Command Line
+      # Tools, preinstalled on the runner image) need nothing extra.
       #
-      #   - name: Install Tauri Linux build dependencies
-      #     if: matrix.os == 'ubuntu-latest'
-      #     run: |
-      #       sudo apt-get update
-      #       sudo apt-get install -y \
-      #         pkg-config \
-      #         libdbus-1-dev \
-      #         libgtk-3-dev \
-      #         libwebkit2gtk-4.1-dev \
-      #         libayatana-appindicator3-dev \
-      #         librsvg2-dev \
-      #         libxdo-dev
+      # `libdbus-1-dev` is kept although the crate that most obviously wanted it —
+      # `keyring`, via Secret Service — left the workspace with Q41. GTK pulls D-Bus in
+      # regardless, and dropping a package from this list on the strength of an untested
+      # guess is how a green build becomes a red one on somebody else's machine.
+      - name: Install Tauri Linux build dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libdbus-1-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev
 
       # `cargo xtask gate` runs the frontend format/typecheck/lint checks only when the
       # pnpm toolchain is present, and skips with a notice otherwise. Without these three
