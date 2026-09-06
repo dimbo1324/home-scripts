@@ -275,6 +275,7 @@ pub fn run_export(
         send_step_started(progress, "4/8: git");
         write_git_report(
             &paths.source_root,
+            &codepack_core::config::disclosed_root(config, &paths.source_root, &paths.project_name),
             &paths.git_report,
             config.include_git_patch,
             redactor.as_ref(),

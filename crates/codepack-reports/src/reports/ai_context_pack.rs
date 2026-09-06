@@ -47,10 +47,13 @@ project when quick project understanding is needed.\n\n",
     );
 
     out.push_str("## Project summary\n\n");
-    out.push_str(&format!("- Source root: `{}`\n", ctx.source_root.display()));
+    out.push_str(&format!(
+        "- Source root: `{}`\n",
+        ctx.disclosed_source_root()
+    ));
     out.push_str(&format!(
         "- Copied root: `{}`\n",
-        ctx.staging_root.display()
+        ctx.disclosed_staging_root()
     ));
     out.push_str(&format!("- Files: {}\n", inventory.files.len()));
     out.push_str(&format!("- Folders: {}\n", inventory.total_dirs));

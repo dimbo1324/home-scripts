@@ -119,12 +119,12 @@ fn render_summary_report(ctx: &ReportContext<'_>, language: Language) -> String 
     out.push_str(&format!(
         "{:<32}: {}\n",
         language.pick("Source root", "Исходный корень"),
-        ctx.source_root.display()
+        ctx.disclosed_source_root()
     ));
     out.push_str(&format!(
         "{:<32}: {}\n",
         language.pick("Copied project root", "Скопированный корень"),
-        ctx.staging_root.display()
+        ctx.disclosed_staging_root()
     ));
     out.push_str(&format!(
         "{:<32}: {}\n",

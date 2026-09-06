@@ -303,7 +303,11 @@ pub fn write_manifest(input: &ManifestInput<'_>, output_file: &Path) -> Result<(
         app_version: input.app_version,
         generated_at: &input.generated_at,
         bundle_name: &input.paths.bundle_name,
-        source_root: input.paths.source_root.display().to_string(),
+        source_root: codepack_core::config::disclosed_root(
+            input.config,
+            &input.paths.source_root,
+            &input.paths.project_name,
+        ),
         project_name: &input.paths.project_name,
         cancelled: input.cancelled,
         settings,

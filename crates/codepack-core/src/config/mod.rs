@@ -40,6 +40,20 @@ pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 /// what an existing installation produces.
 pub const DEFAULT_ARTIFACT_LANGUAGE: &str = "en";
 
+/// What an artifact should say a root directory is.
+///
+/// A free function beside [`Config`] rather than a method on it: the callers are in four
+/// different crates, and they all need the same answer from the same two inputs. Keeping
+/// it here means the substitution is written once and reads the same everywhere.
+pub fn disclosed_root(config: &Config, root: &std::path::Path, project_name: &str) -> String {
+    if config.disclose_absolute_paths {
+        return root.display().to_string();
+    }
+    // The project's own name, not an empty string or a literal placeholder: the field
+    // stays useful for telling two bundles apart while carrying nothing about the machine.
+    format!("<{project_name}>")
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -70,6 +84,22 @@ pub struct Config {
     pub theme: String,
     pub watch_enabled: bool,
     pub watch_clipboard_auto_update: bool,
+    /// Whether artifacts may name the absolute paths of the machine that produced them.
+    ///
+    /// `source_root` and `copied_root` reach `PROJECT_PROFILE.json`, `manifest.json`,
+    /// `02_git.txt` and `12_ai_context_pack.md`. On Windows those read
+    /// `C:\Users\<account name>\…`, so a bundle handed to someone else carries the
+    /// account name, the shape of the working directories, and sometimes an employer's or
+    /// a client's name in the project path (audit No. 21). None of that is a secret in the
+    /// I3 sense, but a tool whose promise is safe handoff should not be the thing that
+    /// discloses it.
+    ///
+    /// Defaults to `true` — disclose — because the fields are part of the artifact
+    /// contract (I5) and the golden references contain today's values. Turning the
+    /// default around is an owner decision with a `schema_version` bump, recorded as Q40.
+    /// With this off the fields keep their type and their place; only the value changes,
+    /// to the project's own name.
+    pub disclose_absolute_paths: bool,
     pub ui_zoom: f64,
     pub language: String,
     pub prompt_goals: Vec<String>,
@@ -148,6 +178,7 @@ impl Default for Config {
             theme: DEFAULT_THEME.to_string(),
             watch_enabled: false,
             watch_clipboard_auto_update: false,
+            disclose_absolute_paths: true,
             ui_zoom: DEFAULT_UI_ZOOM,
             language: DEFAULT_LANGUAGE.to_string(),
             prompt_goals: default_prompt_goals(),
@@ -180,3 +211,57 @@ fn default_prompt_goals() -> Vec<String> {
 }
 
 pub use io::{export_settings, import_settings, load, save};
+
+#[cfg(test)]
+mod disclosure_tests {
+    use super::*;
+
+    /// The default is today's behaviour, byte for byte. Every golden reference and every
+    /// existing installation depends on that: the setting exists to let a user turn the
+    /// disclosure off, not to change what an unchanged configuration produces.
+    #[test]
+    fn the_default_still_writes_the_real_path() {
+        let config = Config::default();
+        assert!(config.disclose_absolute_paths);
+        assert_eq!(
+            disclosed_root(&config, std::path::Path::new("/home/dev/work"), "work"),
+            std::path::Path::new("/home/dev/work").display().to_string()
+        );
+    }
+
+    /// With it off the field keeps its type and its place — only the value stops naming
+    /// the machine. The account name is the thing being kept out of a shared bundle.
+    #[test]
+    fn turning_it_off_replaces_the_path_with_the_project_name() {
+        let config = Config {
+            disclose_absolute_paths: false,
+            ..Config::default()
+        };
+        let answer = disclosed_root(
+            &config,
+            std::path::Path::new(r"C:\Users\dana\Documents\acme-client"),
+            "acme-client",
+        );
+
+        assert_eq!(answer, "<acme-client>");
+        assert!(
+            !answer.contains("dana"),
+            "the account name must not survive"
+        );
+        assert!(!answer.contains("Users"));
+    }
+
+    /// A project whose name cannot be derived still yields something well-formed rather
+    /// than leaking the path as a fallback.
+    #[test]
+    fn an_empty_project_name_does_not_fall_back_to_the_path() {
+        let config = Config {
+            disclose_absolute_paths: false,
+            ..Config::default()
+        };
+        assert_eq!(
+            disclosed_root(&config, std::path::Path::new("/home/dana/x"), ""),
+            "<>"
+        );
+    }
+}

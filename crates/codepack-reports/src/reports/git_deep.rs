@@ -247,7 +247,7 @@ fn recent_log(repo: &Repository, limit: usize) -> Vec<String> {
 fn write_git_deep_report(ctx: &ReportContext<'_>, output_file: &Path) -> Result<(), ReportError> {
     let mut out = String::new();
     out.push_str("=== Git Deep Report ===\n");
-    out.push_str(&format!("Source root: {}\n", ctx.source_root.display()));
+    out.push_str(&format!("Source root: {}\n", ctx.disclosed_source_root()));
     out.push_str(&format!("Generated: {}\n", ctx.plan.generated_at));
     out.push_str(
         "Important: this report is read-only and never switches branches or modifies the repository.\n",

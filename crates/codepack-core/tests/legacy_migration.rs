@@ -145,6 +145,10 @@ fn json_shape_contains_all_expected_keys_with_expected_types() {
         "watch_clipboard_auto_update",
         "redaction_labels",
         "strict_token_checksums",
+        // Added 2026-09-06 (audit No. 21). Same reasoning as the others: a new field with
+        // a `#[serde(default)]`, and its default is today's behaviour, so an old settings
+        // file loads unchanged and every existing artifact keeps the value it had.
+        "disclose_absolute_paths",
     ];
     let number_fields = [
         "schema_version",

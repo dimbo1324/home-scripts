@@ -23,6 +23,9 @@ thiserror = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 serde_json = { workspace = true }
+# Sweeping a produced bundle for a leaked value is the only test shape that scales to
+# thirty-odd artifacts; walking it needs a walker, and this is already the workspace's.
+walkdir = { workspace = true }
 zip = { workspace = true }
 
 [lints]

@@ -352,8 +352,14 @@ fn finish(out: String, output_file: &Path) -> Result<()> {
 /// missing or unreadable Git repository — an un-versioned project must still export
 /// cleanly, the same principle `codepack_diff`'s `disabled_by_git_error` already
 /// encodes for diff selection.
+/// `disclosed_source_root` is what the report should call the project's root — the real
+/// path, or the project's name when `Config::disclose_absolute_paths` is off. Passed in
+/// rather than derived here: this crate deliberately knows nothing about `Config`, and the
+/// caller already holds both (audit No. 21).
+#[allow(clippy::too_many_arguments)]
 pub fn write_git_report(
     source_root: &Path,
+    disclosed_source_root: &str,
     output_file: &Path,
     include_patch: bool,
     redactor: Option<&codepack_security::Redactor>,
@@ -362,7 +368,7 @@ pub fn write_git_report(
 ) -> Result<()> {
     let mut out = String::new();
     out.push_str("=== Git Report ===\n");
-    out.push_str(&format!("Source root: {}\n", source_root.display()));
+    out.push_str(&format!("Source root: {disclosed_source_root}\n"));
     out.push_str(&format!("Generated: {}\n", human_now_utc()));
     out.push_str(&format!(
         "Patch included: {}\n",
@@ -486,6 +492,7 @@ mod tests {
 
         write_git_report(
             dir.path(),
+            &dir.path().display().to_string(),
             &output,
             false,
             Some(&codepack_security::Redactor::plain()),
@@ -508,6 +515,7 @@ mod tests {
 
         write_git_report(
             dir.path(),
+            &dir.path().display().to_string(),
             &output,
             false,
             Some(&codepack_security::Redactor::plain()),
@@ -530,6 +538,7 @@ mod tests {
 
         write_git_report(
             dir.path(),
+            &dir.path().display().to_string(),
             &output,
             true,
             Some(&codepack_security::Redactor::plain()),
@@ -556,6 +565,7 @@ mod tests {
 
         write_git_report(
             dir.path(),
+            &dir.path().display().to_string(),
             &output,
             false,
             None,
@@ -599,6 +609,7 @@ mod tests {
 
         write_git_report(
             dir.path(),
+            &dir.path().display().to_string(),
             &output,
             false,
             Some(&codepack_security::Redactor::plain()),

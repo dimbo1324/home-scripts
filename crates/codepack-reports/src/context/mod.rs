@@ -46,6 +46,29 @@ impl<'a> ReportContext<'a> {
         crate::paths::resolve(&self.staging_root, relative_path)
     }
 
+    /// What an artifact should call the project's source root.
+    ///
+    /// The real path, or the project's name when `Config::disclose_absolute_paths` is
+    /// off. A method rather than each report reaching for `source_root.display()`: the
+    /// audit named four such places and a bundle-wide test then found three more, which
+    /// is what happens when the same substitution has to be remembered seven times.
+    pub fn disclosed_source_root(&self) -> String {
+        codepack_core::config::disclosed_root(self.config, &self.source_root, &self.project_name())
+    }
+
+    /// As [`Self::disclosed_source_root`], for the copied tree.
+    pub fn disclosed_staging_root(&self) -> String {
+        codepack_core::config::disclosed_root(self.config, &self.staging_root, &self.project_name())
+    }
+
+    /// The staging folder's name, which is the project's.
+    pub fn project_name(&self) -> String {
+        self.staging_root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
     /// The language this run's artifacts are written in.
     ///
     /// A method rather than a field: every report reaches it the same way, and the

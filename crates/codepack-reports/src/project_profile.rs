@@ -358,9 +358,9 @@ pub fn build_project_profile(ctx: &ReportContext<'_>) -> ProjectProfile {
     ProjectProfile {
         schema_version: PROJECT_PROFILE_SCHEMA_VERSION,
         generated_at: ctx.plan.generated_at.clone(),
+        source_root: ctx.disclosed_source_root(),
+        copied_root: ctx.disclosed_staging_root(),
         project_name,
-        source_root: ctx.source_root.display().to_string(),
-        copied_root: ctx.staging_root.display().to_string(),
         project_type: detect_project_type(ctx, &stack),
         detected_stack: stack.flattened(),
         stack_by_group: stack.clone(),

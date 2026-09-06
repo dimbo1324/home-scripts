@@ -140,7 +140,10 @@ fn write_git_timeline_report(
 ) -> Result<(), ReportError> {
     let mut out = String::new();
     out.push_str("# Git Timeline Report\n\n");
-    out.push_str(&format!("Source root: `{}`\n\n", ctx.source_root.display()));
+    out.push_str(&format!(
+        "Source root: `{}`\n\n",
+        ctx.disclosed_source_root()
+    ));
     out.push_str(&format!("Generated: {}\n\n", ctx.plan.generated_at));
     out.push_str("This report uses read-only Git queries and does not change the repository.\n\n");
 

@@ -939,3 +939,79 @@ fn the_project_root_itself_is_refused_as_an_output_directory() {
         "{error:?}"
     );
 }
+
+/// Audit No. 21: `source_root` and `copied_root` carry the absolute paths of the machine
+/// that produced the bundle — on Windows `C:\Users\<account name>\…`. With
+/// `disclose_absolute_paths` off, no artifact may name the directory the export ran in.
+#[test]
+fn with_disclosure_off_no_artifact_names_the_machines_directories() {
+    let source = tempfile::tempdir().unwrap();
+    build_fixture(source.path());
+    let output = tempfile::tempdir().unwrap();
+    let db_dir = tempfile::tempdir().unwrap();
+
+    let mut conn = codepack_storage::open(&db_dir.path().join("codepack.db")).unwrap();
+    let config = Config {
+        disclose_absolute_paths: false,
+        keep_staging_folder: true,
+        ..Config::default()
+    };
+    let (tx, _rx) = codepack_core::progress_channel();
+
+    let outcome = run_export(
+        &mut conn,
+        source.path(),
+        output.path(),
+        &config,
+        &HashMap::new(),
+        &tx,
+        &CancellationToken::new(),
+    )
+    .unwrap();
+
+    // The tempdir's own path is the stand-in for the account name: it is the machine
+    // detail that must not travel, and it appears in every one of the four fields the
+    // audit named.
+    let secret_path = source.path().display().to_string();
+    let mut offenders = Vec::new();
+    for entry in walkdir::WalkDir::new(&outcome.paths.staging_dir)
+        .into_iter()
+        .flatten()
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        // Only what codepack writes: a copied source file is the user's own content, and
+        // this setting is not about rewriting that.
+        let relative = entry
+            .path()
+            .strip_prefix(&outcome.paths.staging_dir)
+            .unwrap();
+        let is_copied_source = relative.starts_with(&outcome.paths.project_name);
+        if is_copied_source {
+            continue;
+        }
+        if let Ok(text) = fs::read_to_string(entry.path())
+            && text.contains(&secret_path)
+        {
+            offenders.push(relative.display().to_string());
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these artifacts still name the export machine's directories: {offenders:?}"
+    );
+
+    // And the fields are still there, with the project's name in them — the contract is
+    // kept, only the value changed.
+    let profile =
+        fs::read_to_string(&outcome.paths.project_profile_file).expect("the profile is written");
+    let parsed: serde_json::Value = serde_json::from_str(&profile).unwrap();
+    assert!(
+        parsed["source_root"].as_str().unwrap().starts_with('<'),
+        "{}",
+        parsed["source_root"]
+    );
+    assert!(parsed["copied_root"].as_str().unwrap().starts_with('<'));
+}
