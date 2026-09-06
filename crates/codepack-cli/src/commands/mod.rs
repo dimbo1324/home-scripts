@@ -10,6 +10,7 @@ pub(crate) mod init;
 pub(crate) mod preview;
 pub(crate) mod sanitize;
 pub(crate) mod scan;
+pub(crate) mod settings_file;
 pub(crate) mod verify;
 
 use std::path::{Path, PathBuf};

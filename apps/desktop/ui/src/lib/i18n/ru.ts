@@ -58,6 +58,17 @@ export const ru: Record<TranslationKey, string> = {
   "settings.group.export": "Что экспортировать",
   "settings.group.content": "Содержимое",
   "settings.group.workflow": "Во время работы",
+  "settings.group.transfer": "Поделиться настройками",
+  "settings.transfer.hint":
+    "Сохраните настройки в файл, чтобы коллега их импортировал — тогда экспорты у всех получаются сопоставимыми. Последняя открытая папка в файл не попадает: это путь на вашем компьютере.",
+  "settings.transfer.export": "Сохранить в файл…",
+  "settings.transfer.import": "Загрузить из файла…",
+  "settings.exported": "Настройки сохранены в файл.",
+  "settings.exported.withoutLastFolder":
+    "Настройки сохранены — без последней открытой папки этого компьютера.",
+  "settings.exportFailed": "Не удалось записать файл настроек",
+  "settings.imported": "Настройки загружены.",
+  "settings.importFailed": "Не удалось загрузить этот файл настроек",
   "settings.group.application": "Приложение",
   "settings.profile": "Профиль экспорта",
   "settings.profile.hint": "Исходный набор правил о том, что попадает в бандл.",

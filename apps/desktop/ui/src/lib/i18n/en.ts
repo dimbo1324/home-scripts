@@ -56,6 +56,17 @@ export const en = {
   "settings.group.export": "What to export",
   "settings.group.content": "Contents",
   "settings.group.workflow": "While you work",
+  "settings.group.transfer": "Share these settings",
+  "settings.transfer.hint":
+    "Write these settings to a file so a colleague can import them, and everyone's exports come out comparable. The last-used folder is left out — it names a path on this computer.",
+  "settings.transfer.export": "Export to a file…",
+  "settings.transfer.import": "Import from a file…",
+  "settings.exported": "Settings written.",
+  "settings.exported.withoutLastFolder":
+    "Settings written, without this machine's last-used folder.",
+  "settings.exportFailed": "Could not write the settings file",
+  "settings.imported": "Settings imported.",
+  "settings.importFailed": "Could not import that settings file",
   "settings.group.application": "Application",
   "settings.profile": "Export profile",
   "settings.profile.hint": "The starting set of rules for what belongs in a bundle.",

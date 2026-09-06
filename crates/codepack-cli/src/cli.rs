@@ -54,9 +54,48 @@ pub(crate) enum Command {
     Handoff(HandoffArgs),
     /// Set this project up to use codepack: install the pre-commit hook.
     Init(InitArgs),
+    /// Move this machine's settings to or from a file, so a team can share one
+    /// configuration and produce comparable bundles.
+    Settings(SettingsArgs),
     /// Serve the Model Context Protocol over stdin/stdout, so a coding agent can ask
     /// these questions itself. Speaks JSON-RPC on stdout; nothing else may go there.
     Mcp,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SettingsArgs {
+    #[command(subcommand)]
+    pub command: SettingsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum SettingsCommand {
+    /// Write this machine's settings to a file others can import.
+    Export(SettingsExportArgs),
+    /// Replace this machine's settings with the contents of a file.
+    Import(SettingsImportArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SettingsExportArgs {
+    /// Where to write the settings file.
+    pub path: PathBuf,
+
+    /// Overwrite the file if it already exists.
+    ///
+    /// Required rather than implied, for the reason `init --hook` requires it: a
+    /// configuration somebody has edited is worth as much as a hook somebody has edited,
+    /// and a command that replaces one without being asked is a command people stop
+    /// trusting.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SettingsImportArgs {
+    /// The settings file to read. A missing or malformed file is an error, not a
+    /// fallback to defaults: you named this file on purpose.
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Args)]

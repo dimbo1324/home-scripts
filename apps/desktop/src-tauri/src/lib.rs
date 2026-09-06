@@ -80,6 +80,8 @@ pub fn run() {
             commands::app_info::get_app_info,
             commands::settings::load_global_settings,
             commands::settings::save_global_settings,
+            commands::settings::export_global_settings,
+            commands::settings::import_global_settings,
             commands::settings::apply_preset,
             commands::settings::apply_profile,
             commands::project::open_project,

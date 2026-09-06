@@ -7,6 +7,10 @@
   import {
     applyPreset,
     applyProfile,
+    exportGlobalSettings,
+    importGlobalSettings,
+    pickSettingsDestination,
+    pickSettingsSource,
     saveGlobalSettings,
     setUiZoom,
     startWatch,
@@ -30,6 +34,7 @@
 
   let selectedPreset = $state("");
   let saving = $state(false);
+  let transferring = $state(false);
 
   const diffModes: SegmentOption<string>[] = $derived([
     { value: "all", label: t("settings.diffMode.all"), hint: t("settings.diffMode.hint.all") },
@@ -105,6 +110,46 @@
       reportError("settings.saveFailed", error);
     } finally {
       saving = false;
+    }
+  }
+
+  // Sharing one configuration across a team is the whole point of these two (Q42), so
+  // they act on the *saved* settings rather than on the unsaved session: exporting what
+  // is on screen but not yet saved would hand somebody a file that does not match what
+  // this machine actually does.
+  async function exportSettings(): Promise<void> {
+    const path = await pickSettingsDestination();
+    if (path === null) return;
+    transferring = true;
+    try {
+      const clearedLastFolder = await exportGlobalSettings(path);
+      pushToast(
+        "success",
+        clearedLastFolder ? "settings.exported.withoutLastFolder" : "settings.exported",
+      );
+    } catch (error) {
+      reportError("settings.exportFailed", error);
+    } finally {
+      transferring = false;
+    }
+  }
+
+  async function importSettings(): Promise<void> {
+    const path = await pickSettingsSource();
+    if (path === null) return;
+    transferring = true;
+    try {
+      const imported = await importGlobalSettings(path);
+      // The screen edits `sessionConfig`, so it has to be told: leaving it showing the
+      // old values after a successful import is how a user ends up saving them back.
+      wizard.sessionConfig = imported;
+      setThemePreference(imported.theme as ThemePreference);
+      setLanguage(imported.language);
+      pushToast("success", "settings.imported");
+    } catch (error) {
+      reportError("settings.importFailed", error);
+    } finally {
+      transferring = false;
     }
   }
 
@@ -343,10 +388,34 @@
         </button>
       </div>
     </section>
+
+    <section class="card">
+      <div class="card__header">
+        <h2 class="card__title">{t("settings.group.transfer")}</h2>
+      </div>
+      <div class="card__body stack">
+        <p class="text-muted text-sm">{t("settings.transfer.hint")}</p>
+        <div class="transfer">
+          <button class="btn" onclick={exportSettings} disabled={transferring}>
+            {#if transferring}<span class="spinner"></span>{/if}
+            {t("settings.transfer.export")}
+          </button>
+          <button class="btn" onclick={importSettings} disabled={transferring}>
+            {t("settings.transfer.import")}
+          </button>
+        </div>
+      </div>
+    </section>
   </div>
 {/if}
 
 <style>
+  .transfer {
+    display: flex;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+  }
+
   .pair {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));

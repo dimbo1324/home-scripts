@@ -47,6 +47,26 @@ export async function pickArchiveDestination(
   return typeof selected === "string" ? selected : null;
 }
 
+/** Where to write a settings file. `null` means the user cancelled — not an error.
+ * The dialog asks about an existing file itself, which is why the backend command does
+ * not take a "force" flag the way the CLI does. */
+export async function pickSettingsDestination(): Promise<string | null> {
+  const selected = await saveDialog({
+    defaultPath: "codepack-settings.json",
+    filters: [{ name: "Settings", extensions: ["json"] }],
+  });
+  return typeof selected === "string" ? selected : null;
+}
+
+/** Which settings file to import. `null` means the user cancelled. */
+export async function pickSettingsSource(): Promise<string | null> {
+  const selected = await openDialog({
+    multiple: false,
+    filters: [{ name: "Settings", extensions: ["json"] }],
+  });
+  return typeof selected === "string" ? selected : null;
+}
+
 export type DragDropPhase = "enter" | "leave" | "drop";
 
 /** Paths dragged onto and dropped on the window.
@@ -80,6 +100,20 @@ export function loadGlobalSettings(): Promise<Config> {
 
 export function saveGlobalSettings(config: Config): Promise<void> {
   return invoke("save_global_settings", { config });
+}
+
+/** Writes the stored settings to `path` for another machine to import. Resolves to true
+ * when the last-used folder was left out — it names a path on this computer, so it never
+ * travels (Q42). */
+export function exportGlobalSettings(path: string): Promise<boolean> {
+  return invoke("export_global_settings", { path });
+}
+
+/** Replaces the stored settings with the file at `path` and returns what they now are.
+ * A missing or malformed file rejects rather than falling back to defaults: the user
+ * picked this file, so a silent default would look like success. */
+export function importGlobalSettings(path: string): Promise<Config> {
+  return invoke("import_global_settings", { path });
 }
 
 /** Applies a built-in AI preset's fields onto `config`, returning the updated copy.

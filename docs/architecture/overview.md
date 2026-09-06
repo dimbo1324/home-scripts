@@ -58,10 +58,11 @@ question appear. No `codepack-*` crate knows about Tauri or the frontend
 
 ## The two front ends
 
-**`codepack-cli`** — the `codepack` binary. Eleven commands: `export`, `preview`, `scan`,
+**`codepack-cli`** — the `codepack` binary. Twelve commands: `export`, `preview`, `scan`,
 `history`, `doctor`, `sanitize`, `completions`, `verify`, `explain`, `handoff` (points a
 local coding agent at a bundle), `init --hook` (installs the pre-commit hook into the
-user's own project). `scan` reads three different file sets — the working tree, the git
+user's own project), `settings export|import` (moves one configuration between machines,
+so a team's exports come out comparable — Q42). `scan` reads three different file sets — the working tree, the git
 index (`--staged`), or every distinct version in the history (`--history`) — writes SARIF
 with `--sarif`, and gates on `--fail-on <severity>`, defaulting to `critical` so the
 published exit-code contract is unchanged. Its published
@@ -112,6 +113,11 @@ run id and can be cancelled.
 
 ## Known debt
 
+- **Settings sharing has no per-project scope.** `codepack settings export|import` moves
+  the *global* configuration between machines, which is what a team wants for defaults;
+  a project that needs different settings still uses `.codepack.toml`. Whether the two
+  should be reconcilable — a project file that can be generated from a shared global one
+  — has not been asked.
 - **`codepack-ai-api` is unreachable by a user, and no longer built by the gate.** Roughly
   eight hundred lines — `keys`, `plan`, `provider`, the Anthropic client and `ask` — have
   no command and no screen behind them. Moving the crate out of the workspace (Q41,

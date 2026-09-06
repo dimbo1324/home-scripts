@@ -2225,3 +2225,142 @@ fn recording_and_reading_the_same_file_in_one_run_is_coherent() {
     assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
     assert_eq!(json(&output)["summary"]["total_findings"], 0);
 }
+
+// --- settings export/import (Q42) ------------------------------------------------------
+//
+// The point of the command is a team sharing one configuration, so these check the two
+// things that would make that fail quietly: a setting that does not survive the round
+// trip, and a machine-specific path that does.
+
+#[test]
+fn exported_settings_can_be_imported_back_and_report_what_changed() {
+    let sandbox = Sandbox::new();
+    let file = sandbox.out().join("team-settings.json");
+
+    let exported = sandbox.run(&["--json", "settings", "export", &file.display().to_string()]);
+    assert_eq!(code(&exported), 0, "stderr = {}", stderr(&exported));
+    assert!(file.is_file());
+
+    // Change three settings, as a teammate handing over their configuration would.
+    let mut config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    config["safe_export_mode"] = serde_json::json!("strict");
+    config["export_profile"] = serde_json::json!("quick");
+    config["extra_ignored_dirs"] = serde_json::json!(["vendor"]);
+    std::fs::write(&file, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+    let imported =
+        json(&sandbox.run(&["--json", "settings", "import", &file.display().to_string()]));
+    assert_eq!(imported["changed"], 3, "{imported}");
+
+    // Importing the same file again changes nothing: the operation is idempotent, which
+    // is what makes it safe to put in a team's setup script.
+    let again = json(&sandbox.run(&["--json", "settings", "import", &file.display().to_string()]));
+    assert_eq!(again["changed"], 0, "{again}");
+}
+
+#[test]
+fn an_exported_settings_file_does_not_carry_this_machines_last_folder() {
+    // `last_root` is a path on one computer, and on Windows it contains the account name.
+    // A configuration meant to be handed round must not take it along.
+    let sandbox = Sandbox::new();
+    let file = sandbox.out().join("settings.json");
+
+    // Give the machine a last-used folder first, so the test is not passing because the
+    // field happened to be empty.
+    let project = sandbox.project().display().to_string();
+    let out = sandbox.out().display().to_string();
+    assert_eq!(
+        code(&sandbox.run(&["--json", "export", &project, "--out", &out])),
+        0
+    );
+
+    let report = json(&sandbox.run(&["--json", "settings", "export", &file.display().to_string()]));
+    assert_eq!(report["last_root_cleared"], true, "{report}");
+
+    let written = std::fs::read_to_string(&file).unwrap();
+    let config: serde_json::Value = serde_json::from_str(&written).unwrap();
+    assert_eq!(config["last_root"], "", "{written}");
+    assert!(
+        !written.contains(&project),
+        "the exported file names this machine's project folder"
+    );
+}
+
+#[test]
+fn importing_a_shared_file_leaves_this_machines_last_folder_alone() {
+    let sandbox = Sandbox::new();
+    let file = sandbox.out().join("shared.json");
+    assert_eq!(
+        code(&sandbox.run(&["settings", "export", &file.display().to_string()])),
+        0
+    );
+
+    // A run gives this machine a `last_root`; importing a shared file must not wipe it,
+    // or everyone syncing a team configuration loses their place.
+    let project = sandbox.project().display().to_string();
+    let out = sandbox.out().display().to_string();
+    sandbox.run(&["--json", "export", &project, "--out", &out]);
+
+    let imported =
+        json(&sandbox.run(&["--json", "settings", "import", &file.display().to_string()]));
+    assert_eq!(
+        imported["changed"], 0,
+        "importing a file that differs only in last_root must change nothing: {imported}"
+    );
+}
+
+#[test]
+fn exporting_over_an_existing_file_needs_force() {
+    let sandbox = Sandbox::new();
+    let file = sandbox.out().join("settings.json");
+    std::fs::write(&file, "{}").unwrap();
+
+    let refused = sandbox.run(&["settings", "export", &file.display().to_string()]);
+    assert_ne!(code(&refused), 0);
+    assert!(stderr(&refused).contains("--force"), "{}", stderr(&refused));
+    // The file somebody had is still theirs.
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "{}");
+
+    let forced = sandbox.run(&["settings", "export", &file.display().to_string(), "--force"]);
+    assert_eq!(code(&forced), 0, "stderr = {}", stderr(&forced));
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("safe_export_mode")
+    );
+}
+
+#[test]
+fn importing_a_missing_file_fails_rather_than_falling_back_to_defaults() {
+    // `load` falls back on a broken global file by design; `import` must not, because the
+    // user named this path on purpose and a silent default would look like success.
+    let sandbox = Sandbox::new();
+    let missing = sandbox.out().join("does-not-exist.json");
+
+    let error = sandbox.run(&["settings", "import", &missing.display().to_string()]);
+    assert_ne!(code(&error), 0);
+    assert!(
+        stderr(&error).contains("does-not-exist.json"),
+        "{}",
+        stderr(&error)
+    );
+}
+
+#[test]
+fn importing_a_malformed_file_names_a_position_and_not_the_value() {
+    // The audit No. 11 rule, at the one entry point that reads a user-named JSON file.
+    let sandbox = Sandbox::new();
+    let file = sandbox.out().join("broken.json");
+    std::fs::write(
+        &file,
+        "{\n  \"redact_secrets\": \"totally-fake-value-0001\"\n}",
+    )
+    .unwrap();
+
+    let error = sandbox.run(&["settings", "import", &file.display().to_string()]);
+    assert_ne!(code(&error), 0);
+    let rendered = stderr(&error);
+    assert!(!rendered.contains("totally-fake-value-0001"), "{rendered}");
+    assert!(rendered.contains("line"), "{rendered}");
+}
