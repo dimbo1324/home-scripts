@@ -92,7 +92,7 @@
     </div>
   {:else}
     {@const profile = summary}
-    <div class="stats">
+    <div class="stats" style:--stats-min="180px">
       <Stat
         label={t("analytics.stat.files")}
         value={formatCount(profile.files, language.current)}
@@ -164,12 +164,6 @@
 </div>
 
 <style>
-  .stats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: var(--space-4);
-  }
-
   .split {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));

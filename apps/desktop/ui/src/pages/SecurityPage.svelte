@@ -9,6 +9,7 @@
   import type { Finding } from "$lib/api/types";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import Icon from "$lib/components/Icon.svelte";
+  import SearchField from "$lib/components/SearchField.svelte";
   import Segmented, { type SegmentOption } from "$lib/components/Segmented.svelte";
   import Stat from "$lib/components/Stat.svelte";
   import { confidenceLabel, severityLabel } from "$lib/i18n/enums";
@@ -156,7 +157,7 @@
       {:else}
         {@const summary = wizard.scan.summary}
         <div class="card__body stack--tight stack">
-          <div class="stats">
+          <div class="stats" style:--stats-min="150px">
             <Stat label={t("security.stat.total")} value={summary.total_findings} icon="alert" />
             <Stat
               label={t("security.stat.critical")}
@@ -170,24 +171,7 @@
           </div>
 
           <div class="toolbar">
-            <div class="search">
-              <span class="search__icon"><Icon name="search" size={14} /></span>
-              <input
-                class="input"
-                aria-label={t("security.search")}
-                placeholder={t("security.search")}
-                bind:value={query}
-              />
-              {#if query}
-                <button
-                  class="btn btn--ghost btn--icon btn--sm"
-                  aria-label={t("common.clear")}
-                  onclick={() => (query = "")}
-                >
-                  <Icon name="x" size={13} />
-                </button>
-              {/if}
-            </div>
+            <SearchField bind:value={query} label={t("security.search")} minWidth="220px" />
             <Segmented
               options={severityFilters}
               value={severity}
@@ -241,42 +225,11 @@
 {/if}
 
 <style>
-  .stats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: var(--space-4);
-  }
-
   .toolbar {
     display: flex;
     align-items: center;
     gap: var(--space-5);
     flex-wrap: wrap;
-  }
-
-  .search {
-    position: relative;
-    display: flex;
-    align-items: center;
-    flex: 1;
-    min-width: 220px;
-  }
-
-  .search__icon {
-    position: absolute;
-    left: var(--space-4);
-    color: var(--fg-faint);
-    pointer-events: none;
-  }
-
-  .search .input {
-    padding-left: calc(var(--space-4) * 2 + 14px);
-    padding-right: 32px;
-  }
-
-  .search button {
-    position: absolute;
-    right: 3px;
   }
 
   .groups {

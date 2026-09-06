@@ -30,12 +30,17 @@ mapfile -d '' -t staged < <(git diff --cached --name-only --diff-filter=ACMR -z)
 # promotion of unstaged work that rule 2 exists to prevent.
 mapfile -d '' -t unstaged < <(git diff --name-only -z)
 
+# Built once, into an associative array, rather than scanned per candidate: the loop
+# below asks this question for every staged file, so a linear search made the check
+# O(staged x unstaged) — noticeable on a large commit in a large tree (audit No. 40).
+# Bash 4 has `declare -A`, and both Git Bash on Windows and CI run Bash 5.
+declare -A unstaged_set=()
+for path in ${unstaged[@]+"${unstaged[@]}"}; do
+  unstaged_set["$path"]=1
+done
+
 is_partially_staged() {
-  local candidate=$1 other
-  for other in ${unstaged[@]+"${unstaged[@]}"}; do
-    [ "$candidate" = "$other" ] && return 0
-  done
-  return 1
+  [ -n "${unstaged_set["$1"]+set}" ]
 }
 
 rust=()

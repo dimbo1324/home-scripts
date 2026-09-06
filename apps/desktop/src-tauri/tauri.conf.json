@@ -2,7 +2,6 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "codepack",
   "mainBinaryName": "codepack-desktop",
-  "version": "2.0.0",
   "identifier": "dev.codepack.desktop",
   "build": {
     "beforeDevCommand": "pnpm --filter @codepack/ui dev",

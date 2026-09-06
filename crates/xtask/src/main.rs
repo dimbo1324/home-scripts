@@ -8,6 +8,7 @@
 mod frontend;
 mod golden;
 mod hooks;
+mod ignored_advisories;
 mod network_isolation;
 mod report_redaction;
 mod scripts;
@@ -82,6 +83,14 @@ fn gate(root: &Path, quick: bool) -> Result<(), String> {
         step(root, "tests", "cargo", &["test", "--workspace"])?;
     }
     step(root, "deny", "cargo", &["deny", "check"])?;
+    if !quick {
+        // Reporting only: an ignore entry that has stopped matching is housekeeping,
+        // and turning a dependency update into a red gate would teach people to delete
+        // the check rather than the entry. Out of the quick gate because it runs
+        // `cargo deny` a second time.
+        println!("\n=== ignored advisories ===");
+        ignored_advisories::check(root)?;
+    }
     println!("\n=== frontend ===");
     if frontend::require_or_skip(root)? {
         frontend::gate_checks(root)?;

@@ -491,6 +491,15 @@
   flex: 1;
 }
 
+/* A row of Stat cards that reflows. Four pages carried this block in their own <style>,
+   differing only in the minimum column width (audit No. 36) — so it lives here once, and
+   a page that wants a different minimum sets --stats-min rather than restating the grid. */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(var(--stats-min, 160px), 1fr));
+  gap: var(--space-4);
+}
+
 .page-header {
   display: flex;
   align-items: flex-start;

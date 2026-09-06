@@ -41,6 +41,7 @@
 //! about to send?" is a security question with a real answer.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -79,8 +80,14 @@ pub fn fingerprint(rule: &str, file: &str, redacted_message: &str) -> String {
         if hex.len() >= FINGERPRINT_HEX_LEN {
             break;
         }
+        // `write!` into the existing buffer rather than `push_str(&format!(...))`, which
+        // allocates a `String` per byte — eight of them per fingerprint, and a fingerprint
+        // is computed for every finding, twice over in `verify` (audit No. 35). The same
+        // shape `codepack_security::cache::cache_key` already uses.
+        //
         // Two hex digits per byte; `FINGERPRINT_HEX_LEN` is even, so this lands exactly.
-        hex.push_str(&format!("{byte:02x}"));
+        // Writing into a `String` cannot fail.
+        let _ = write!(hex, "{byte:02x}");
     }
     hex
 }

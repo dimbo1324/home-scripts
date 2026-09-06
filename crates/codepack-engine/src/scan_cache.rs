@@ -46,11 +46,11 @@ impl SqliteScanCache {
     /// a different build, and the worst it can cost is one file being scanned again.
     pub(crate) fn load(conn: &Connection) -> Result<Self> {
         let mut entries = HashMap::new();
-        for (key, json) in codepack_storage::scan_cache::load_scan_cache(conn)? {
+        codepack_storage::scan_cache::load_scan_cache(conn, |key, json| {
             if let Some(findings) = cache::decode(&json) {
                 entries.insert(key, findings);
             }
-        }
+        })?;
         Ok(Self {
             entries,
             pending: Mutex::new(Vec::new()),

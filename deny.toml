@@ -3,33 +3,38 @@
 
 [advisories]
 yanked = "deny"
-# All 16 entries below are transitive dependencies of the S11 Tauri desktop shell,
-# none a direct dependency of our own code, and none has a safe upgrade available
-# per the advisories themselves. Owner decision 2026-07-25, see
-# docs/__arch__/open-questions.md. Revisit each group if its upstream root moves.
+# Every entry below is a transitive dependency of the S11 Tauri desktop shell, none a
+# direct dependency of our own code, and none has a safe upgrade available per the
+# advisories themselves. Owner decision 2026-07-25, see docs/__arch__/open-questions.md.
+#
+# Each carries a `reason`, not a trailing comment, so the justification appears in
+# `cargo deny`'s own output rather than only in this file (audit No. 33). The
+# `ignored advisories` step of `cargo xtask gate` reports any entry that no longer matches
+# anything in the graph, so the list prunes itself instead of outliving its cause.
 ignore = [
     # unic-* (open-i18n/rust-unic, archived) -- via urlpattern -> tauri-utils -> tauri
-    "RUSTSEC-2025-0075", # unic-char-range
-    "RUSTSEC-2025-0080", # unic-common
-    "RUSTSEC-2025-0081", # unic-char-property
-    "RUSTSEC-2025-0098", # unic-ucd-version
-    "RUSTSEC-2025-0100", # unic-ucd-ident
+    { id = "RUSTSEC-2025-0075", reason = "unic-char-range: archived upstream, reached only through tauri-utils" },
+    { id = "RUSTSEC-2025-0080", reason = "unic-common: archived upstream, reached only through tauri-utils" },
+    { id = "RUSTSEC-2025-0081", reason = "unic-char-property: archived upstream, reached only through tauri-utils" },
+    { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version: archived upstream, reached only through tauri-utils" },
+    { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident: archived upstream, reached only through tauri-utils" },
 
-    # gtk-rs GTK3 bindings (unmaintained; GTK4 bindings exist but Tauri's tray
-    # crates haven't migrated) -- via tray-icon/muda -> tauri, the Linux tray backend
-    "RUSTSEC-2024-0411", # gdkwayland-sys
-    "RUSTSEC-2024-0412", # gdk
-    "RUSTSEC-2024-0413", # atk
-    "RUSTSEC-2024-0414", # gdkx11-sys
-    "RUSTSEC-2024-0415", # gtk
-    "RUSTSEC-2024-0416", # atk-sys
-    "RUSTSEC-2024-0417", # gdkx11
-    "RUSTSEC-2024-0418", # gdk-sys
-    "RUSTSEC-2024-0419", # gtk3-macros
-    "RUSTSEC-2024-0420", # gtk-sys
+    # gtk-rs GTK3 bindings (unmaintained; GTK4 bindings exist but Tauri's tray crates
+    # have not migrated) -- via tray-icon/muda -> tauri, the Linux tray backend, which
+    # this Windows-only build does not even compile.
+    { id = "RUSTSEC-2024-0411", reason = "gdkwayland-sys: GTK3 binding, Linux tray backend only" },
+    { id = "RUSTSEC-2024-0412", reason = "gdk: GTK3 binding, Linux tray backend only" },
+    { id = "RUSTSEC-2024-0413", reason = "atk: GTK3 binding, Linux tray backend only" },
+    { id = "RUSTSEC-2024-0414", reason = "gdkx11-sys: GTK3 binding, Linux tray backend only" },
+    { id = "RUSTSEC-2024-0415", reason = "gtk: GTK3 binding, Linux tray backend only" },
+    { id = "RUSTSEC-2024-0416", reason = "atk-sys: GTK3 binding, Linux tray backend only" },
+    { id = "RUSTSEC-2024-0417", reason = "gdkx11: GTK3 binding, Linux tray backend only" },
+    { id = "RUSTSEC-2024-0418", reason = "gdk-sys: GTK3 binding, Linux tray backend only" },
+    { id = "RUSTSEC-2024-0419", reason = "gtk3-macros: GTK3 binding, Linux tray backend only" },
+    { id = "RUSTSEC-2024-0420", reason = "gtk-sys: GTK3 binding, Linux tray backend only" },
 
     # pulled in by glib-macros, part of the same GTK3 stack above
-    "RUSTSEC-2024-0370", # proc-macro-error
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error: via glib-macros, same GTK3 stack" },
 ]
 
 [bans]

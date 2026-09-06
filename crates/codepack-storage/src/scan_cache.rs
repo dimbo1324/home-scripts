@@ -27,15 +27,29 @@ use crate::types::unix_timestamp;
 /// far below it while turning tens of thousands of round trips into a few hundred.
 const TOUCH_BATCH: usize = 100;
 
-/// Every entry, as `(key, findings_json)`.
-pub fn load_scan_cache(conn: &Connection) -> Result<Vec<(String, String)>> {
+/// Every entry, handed to `visit` one at a time as `(key, findings_json)`.
+///
+/// A callback rather than a returned `Vec`: the caller's job is to build a map, and
+/// collecting into a vector first meant up to fifty thousand `(String, String)` pairs
+/// existing twice at the peak — once in the vector, once in the map (audit No. 34).
+/// Streaming them costs nothing and halves that.
+///
+/// The whole table is still read. The audit suggested selecting only the keys this run
+/// needs, and that was considered and not done: a key is a hash of a file's *contents*, so
+/// knowing the keys means reading every file before the scan — an extra full read pass
+/// over the project, to avoid loading a bounded number of small rows. That trade is very
+/// likely a loss, and making it without measuring would be worse than the cost it
+/// removes. Recorded rather than assumed.
+pub fn load_scan_cache(conn: &Connection, mut visit: impl FnMut(String, String)) -> Result<()> {
     let mut stmt = conn.prepare("SELECT key, findings_json FROM file_scan_cache")?;
-    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-    let mut entries = Vec::new();
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
     for row in rows {
-        entries.push(row?);
+        let (key, json) = row?;
+        visit(key, json);
     }
-    Ok(entries)
+    Ok(())
 }
 
 /// Writes new entries and refreshes the stamps of the ones that were used, in one
@@ -120,6 +134,14 @@ pub fn prune_scan_cache(conn: &Connection, keep: u32) -> Result<usize> {
 mod tests {
     use super::*;
 
+    /// The tests want the whole table as a list; production wants it streamed. One
+    /// helper here rather than a closure at twenty call sites.
+    fn all_entries(conn: &Connection) -> Vec<(String, String)> {
+        let mut entries = Vec::new();
+        load_scan_cache(conn, |key, json| entries.push((key, json))).unwrap();
+        entries
+    }
+
     fn database() -> (tempfile::TempDir, Connection) {
         let dir = tempfile::tempdir().unwrap();
         let conn = crate::migrations::open(&dir.path().join("codepack.db")).unwrap();
@@ -195,7 +217,7 @@ mod tests {
     #[test]
     fn a_fresh_cache_is_empty() {
         let (_dir, conn) = database();
-        assert!(load_scan_cache(&conn).unwrap().is_empty());
+        assert!(all_entries(&conn).is_empty());
     }
 
     #[test]
@@ -203,7 +225,7 @@ mod tests {
         let (_dir, mut conn) = database();
         store_scan_cache(&mut conn, &entries(&[("a", "[]"), ("b", "[1]")]), &[]).unwrap();
 
-        let mut loaded = load_scan_cache(&conn).unwrap();
+        let mut loaded = all_entries(&conn);
         loaded.sort();
         assert_eq!(loaded, entries(&[("a", "[]"), ("b", "[1]")]));
     }
@@ -216,7 +238,7 @@ mod tests {
         store_scan_cache(&mut conn, &entries(&[("a", "[]")]), &[]).unwrap();
         store_scan_cache(&mut conn, &entries(&[("a", "[2]")]), &[]).unwrap();
 
-        let loaded = load_scan_cache(&conn).unwrap();
+        let loaded = all_entries(&conn);
         assert_eq!(loaded, entries(&[("a", "[2]")]));
     }
 
@@ -224,7 +246,7 @@ mod tests {
     fn an_empty_write_is_a_no_op_rather_than_an_error() {
         let (_dir, mut conn) = database();
         store_scan_cache(&mut conn, &[], &[]).unwrap();
-        assert!(load_scan_cache(&conn).unwrap().is_empty());
+        assert!(all_entries(&conn).is_empty());
     }
 
     /// Least-recently-*used*, not least recently written: a dependency scanned on every
@@ -246,7 +268,7 @@ mod tests {
         let removed = prune_scan_cache(&conn, 1).unwrap();
         assert_eq!(removed, 2);
 
-        let loaded = load_scan_cache(&conn).unwrap();
+        let loaded = all_entries(&conn);
         assert_eq!(loaded, entries(&[("kept", "[]")]));
     }
 
@@ -255,7 +277,7 @@ mod tests {
         let (_dir, mut conn) = database();
         store_scan_cache(&mut conn, &entries(&[("a", "[]"), ("b", "[]")]), &[]).unwrap();
         assert_eq!(prune_scan_cache(&conn, 10).unwrap(), 0);
-        assert_eq!(load_scan_cache(&conn).unwrap().len(), 2);
+        assert_eq!(all_entries(&conn).len(), 2);
     }
 
     /// Touching a key that is not there is not an error: the run that used it may have
@@ -264,7 +286,7 @@ mod tests {
     fn touching_an_absent_key_is_harmless() {
         let (_dir, mut conn) = database();
         store_scan_cache(&mut conn, &[], &["never-stored".to_string()]).unwrap();
-        assert!(load_scan_cache(&conn).unwrap().is_empty());
+        assert!(all_entries(&conn).is_empty());
     }
 
     /// The cache is content-addressed and shared, so it deliberately has no project
@@ -274,7 +296,7 @@ mod tests {
         let (_dir, mut conn) = database();
         store_scan_cache(&mut conn, &entries(&[("shared", "[]")]), &[]).unwrap();
         conn.execute("DELETE FROM project", []).unwrap();
-        assert_eq!(load_scan_cache(&conn).unwrap().len(), 1);
+        assert_eq!(all_entries(&conn).len(), 1);
     }
 
     /// `keep = 0` empties the cache. Pinned because "0 means no limit" is the equally
@@ -285,7 +307,7 @@ mod tests {
         store_scan_cache(&mut conn, &entries(&[("a", "[]"), ("b", "[]")]), &[]).unwrap();
 
         assert_eq!(prune_scan_cache(&conn, 0).unwrap(), 2);
-        assert!(load_scan_cache(&conn).unwrap().is_empty());
+        assert!(all_entries(&conn).is_empty());
     }
 
     /// A stored value is opaque to this layer: it is whatever `codepack-security` encoded,
@@ -297,7 +319,7 @@ mod tests {
         let odd = "not json at all — {\"unbalanced\": ";
         store_scan_cache(&mut conn, &[("k".to_string(), odd.to_string())], &[]).unwrap();
 
-        let loaded = load_scan_cache(&conn).unwrap();
+        let loaded = all_entries(&conn);
         assert_eq!(loaded, vec![("k".to_string(), odd.to_string())]);
     }
 
@@ -309,7 +331,7 @@ mod tests {
         let key = "a'b\"c%d_e--f";
         store_scan_cache(&mut conn, &[(key.to_string(), "[]".to_string())], &[]).unwrap();
 
-        let loaded = load_scan_cache(&conn).unwrap();
+        let loaded = all_entries(&conn);
         assert_eq!(loaded, vec![(key.to_string(), "[]".to_string())]);
     }
 }

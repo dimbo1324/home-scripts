@@ -254,6 +254,36 @@ fn declaration_of(manifest: &str, name: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+mod list_tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    /// The denylist is part of the mechanism that holds invariant I1, and it had `"ureq"`
+    /// in it twice — harmless to run, but a sign the list had not been read as data
+    /// (audit No. 39). A duplicate now fails here.
+    #[test]
+    fn the_network_crate_list_names_each_crate_once() {
+        let unique: HashSet<&&str> = NETWORK_CRATES.iter().collect();
+        assert_eq!(
+            unique.len(),
+            NETWORK_CRATES.len(),
+            "a crate is listed twice in NETWORK_CRATES"
+        );
+    }
+
+    /// And the list is not empty, so the check above cannot pass vacuously.
+    #[test]
+    fn the_network_crate_list_is_not_empty() {
+        assert!(NETWORK_CRATES.len() > 5, "{NETWORK_CRATES:?}");
+        assert!(
+            NETWORK_CRATES.contains(&"ureq"),
+            "the one we ship must be listed"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

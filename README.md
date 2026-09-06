@@ -39,7 +39,8 @@ Two ways to use it, both over the same engine — neither is a wrapper around th
 what goes in and what stays out, a results panel, run history, folder watching, light and
 dark themes, English and Russian interfaces switchable without a restart, and a tray icon.
 
-**Command line** — the `codepack` binary. Twelve commands, a stable exit-code contract,
+**Command line** — the `codepack` binary. Eleven commands plus the MCP server, a stable
+exit-code contract,
 and `--json` on everything.
 
 **MCP server** — `codepack mcp`, for a coding agent rather than a person. Same engine,

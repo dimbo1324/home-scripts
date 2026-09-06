@@ -325,12 +325,6 @@
     color: var(--danger);
   }
 
-  .stats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: var(--space-4);
-  }
-
   .bundle {
     display: flex;
     align-items: center;
