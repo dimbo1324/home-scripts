@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 
 use crate::error::Result;
 use crate::types::unix_timestamp;
@@ -135,25 +135,92 @@ pub fn open(path: &Path) -> Result<Connection> {
 }
 
 pub(crate) fn apply_pragmas(conn: &Connection) -> Result<()> {
-    conn.pragma_update(None, "foreign_keys", true)?;
-    // No-op (silently ignored by SQLite) for `:memory:` connections, which always use
-    // in-process journalling regardless of this pragma; real on-disk files get WAL.
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    // SQLite allows only one writer at a time even under WAL; without a busy timeout,
-    // a second connection's write transaction fails immediately with `SQLITE_BUSY`
-    // instead of waiting its turn, which the multi-threaded concurrency test below
-    // would otherwise hit under real contention.
+    // First, before anything that can block. SQLite allows only one writer at a time
+    // even under WAL; without a busy timeout a contended statement fails immediately
+    // with `SQLITE_BUSY` instead of waiting its turn. Setting it last — as this did
+    // until 2026-09-06 — left the two pragmas below unprotected, and switching the
+    // journal mode takes a lock of its own.
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.pragma_update(None, "foreign_keys", true)?;
+    enable_wal(conn)
+}
+
+/// Switches the database to WAL, waiting out other connections doing the same.
+///
+/// `PRAGMA journal_mode = WAL` needs an exclusive lock and — unlike an ordinary
+/// statement — does **not** go through the busy handler, so `busy_timeout` does not
+/// cover it: with another connection on the database it fails immediately with
+/// `SQLITE_BUSY`. Several processes opening a brand-new database at the same moment is
+/// exactly when that happens, and it is the same first-run moment the migration race
+/// above lives in (both found 2026-09-06).
+///
+/// The mode is a property of the *file* and persists, so the winner switches it once and
+/// everyone else sees `wal` on the next read and stops. `:memory:` databases always
+/// report `memory` and cannot be switched, which counts as done rather than as a failure.
+fn enable_wal(conn: &Connection) -> Result<()> {
+    const ATTEMPTS: u32 = 50;
+    const PAUSE: std::time::Duration = std::time::Duration::from_millis(20);
+
+    for attempt in 0..ATTEMPTS {
+        let mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        if mode.eq_ignore_ascii_case("wal") || mode.eq_ignore_ascii_case("memory") {
+            return Ok(());
+        }
+        match conn.pragma_update(None, "journal_mode", "WAL") {
+            Ok(()) => return Ok(()),
+            Err(error) if is_busy(&error) && attempt + 1 < ATTEMPTS => std::thread::sleep(PAUSE),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    // Every attempt was busy and the mode never became WAL. Journalling still works —
+    // the database is simply in rollback mode — so this is not worth refusing to open
+    // for, and saying so would mean inventing an error the caller cannot act on.
     Ok(())
 }
 
+fn is_busy(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DatabaseBusy,
+                ..
+            },
+            _
+        )
+    )
+}
+
+/// Applies whatever has not been applied yet, correctly when two connections do it at
+/// once.
+///
+/// The version must be read under the *same* lock that applies the migration. It was not
+/// until 2026-09-06: the read happened outside any transaction and `Connection::
+/// transaction` is DEFERRED, which takes the write lock only at the first write. So two
+/// connections opening a fresh database both read version 0, both then ran `CREATE
+/// TABLE`, and whichever lost the race failed with "table schema_version already exists"
+/// — on CI, where the desktop suite opens one database from several test threads, and
+/// equally for a user running the app and the CLI for the first time at the same moment.
+///
+/// `TransactionBehavior::Immediate` takes the write lock up front, so the second
+/// connection waits at `transaction_with_behavior`, and then reads the version the first
+/// one committed. The cheap unlocked read before the loop keeps the common case — an
+/// already-migrated database, which is every open after the first — from serialising on
+/// that lock at all.
 pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {
-    let current = current_version(conn)?;
+    let latest = MIGRATIONS.last().map_or(0, |(version, _)| *version);
+    if current_version(conn)? >= latest {
+        return Ok(());
+    }
+
     for (version, sql) in MIGRATIONS {
-        if *version <= current {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Re-read inside the lock: another connection may have applied this while we
+        // waited for it.
+        if current_version(&tx)? >= *version {
+            tx.rollback()?;
             continue;
         }
-        let tx = conn.transaction()?;
         tx.execute_batch(sql)?;
         tx.execute(
             "INSERT INTO schema_version (version, applied_at) VALUES (?1, ?2)",

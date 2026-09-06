@@ -120,3 +120,71 @@ fn two_threads_recording_export_runs_concurrently_stay_consistent() {
         "foreign_key_check violations: {violations:?}"
     );
 }
+
+/// Several connections opening a database that does not exist yet.
+///
+/// The case that had no coverage: every other test here opens the database once on the
+/// main thread first, so the migration is already applied by the time any thread runs.
+/// A first open done by two connections at once used to fail with "table schema_version
+/// already exists" — the version was read outside the lock that applied the migration.
+/// It reached CI on 2026-09-06 as a flaky desktop test, and it is equally what a user
+/// starting the app and the CLI together on a new machine would have hit.
+///
+/// A barrier rather than hoping the threads overlap: without it the first thread usually
+/// finishes migrating before the others start, which is precisely the passing case.
+#[test]
+fn several_connections_may_create_the_same_database_at_once() {
+    use std::sync::{Arc, Barrier};
+
+    const THREADS: usize = 8;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("fresh.db");
+    assert!(
+        !db_path.exists(),
+        "the race is about creating it, not opening it"
+    );
+
+    let barrier = Arc::new(Barrier::new(THREADS));
+    let mut handles = Vec::new();
+    for _ in 0..THREADS {
+        let db_path = db_path.clone();
+        let barrier = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            open(&db_path).map(|_| ())
+        }));
+    }
+
+    let failures: Vec<String> = handles
+        .into_iter()
+        .filter_map(|handle| handle.join().unwrap().err())
+        .map(|error| error.to_string())
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "opening one fresh database from {THREADS} threads failed: {failures:?}"
+    );
+
+    // And the schema is whole, not half-applied by whichever thread won.
+    let conn = open(&db_path).unwrap();
+    let tables: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN
+             ('schema_version', 'file_scan_cache')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        tables, 2,
+        "both migrations must have been applied exactly once"
+    );
+    let versions: i64 = conn
+        .query_row("SELECT COUNT(*) FROM schema_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        versions, 2,
+        "a migration must be recorded once, not once per thread"
+    );
+}

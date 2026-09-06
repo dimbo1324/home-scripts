@@ -41,8 +41,15 @@ all the documentation; produce an up-to-date `.exe`. Further features come after
 
 - [+] `cargo xtask gate` green — all ten sections; 1553 tests in 56 binaries, 0 failed
 - [+] `cargo xtask ai-api` green — the excluded crate the gate cannot see
-- [ ] CI green on all three runners
-- [ ] The installer builds, and the built app reports the new version
+- [+] CI green on all three runners — after it caught two real races on the first merge.
+      `ubuntu` and `windows` failed while `macos` passed, which read like a platform
+      difference until the annotation carried the panic text: "table schema_version
+      already exists" on one, "table file_scan_cache already exists" on the other.
+      Different tables means a race, not a platform. Both fixed in `codepack-storage`,
+      with an eight-thread regression test run twenty times; the reasoning is in
+      `docs/__arch__/open-questions.md`
+- [+] The installer builds (`codepack_2.0.0_x64-setup.exe`, 5.8 MiB), its checksum
+      verifies with `sha256sum -c`, and the rebuilt CLI reports `codepack 2.0.0`
 
 ## Documentation
 
