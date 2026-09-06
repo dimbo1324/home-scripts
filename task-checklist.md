@@ -61,10 +61,12 @@ all the documentation; produce an up-to-date `.exe`. Further features come after
 
 ## Completion
 
-- [ ] Merge to `main` fast-forward, push
-- [ ] Build the installer from `main`, verify the checksum file
-- [ ] Hand the `.exe` to the owner
-- [ ] Final report, including everything not done
+- [+] Merged to `main` fast-forward and pushed; CI green on all three runners at `d406184`
+- [+] Installer built from `main`, checksum verified. Built twice: the first was made at
+      `7dda812`, before CI found the database races, so it was rebuilt at `d406184` and
+      the stale one withdrawn rather than left in the owner's hands
+- [+] Handed the `.exe` to the owner
+- [+] Final report, including everything not done
 
 ## Explicitly out of scope for this release
 
@@ -78,3 +80,9 @@ Named here so the report cannot quietly drop them:
 - **Q19 (Mermaid rendering), Q20 (file:line links)** — each needs a new dependency or new
   work in `codepack-diff`; both are owner decisions.
 - **Q43** — the residual TOCTOU window in the copy guard, awaiting a `libc` decision.
+- **The desktop tests write to the real user data directory.** `open_database()` goes
+  through `AppPaths::resolve()` with no seam for a test path, so `cargo test` mutates the
+  developer's own export history — and that is why two threads of one test binary
+  collided on one database. The race itself is fixed in `codepack-storage`; giving the
+  tests their own directory needs a path seam through several shell commands, which is a
+  refactor rather than a release step. Recorded in `docs/__arch__/open-questions.md`.
