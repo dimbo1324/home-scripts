@@ -82,8 +82,8 @@ readers by design.
 
 ## Product guardrails
 
-- **Privacy is absolute.** Analysis is local; network access is forbidden everywhere
-  except the explicitly user-initiated AI handoff in stage S13.
+- **Privacy is absolute.** Analysis is local; no workspace crate reaches the network.
+  S13's API path is the excluded `codepack-ai-api` (Q41).
 - **The source is immutable.** Export never writes into the source project folder.
 - **Bytes stay.** Byte-based size reporting is preserved everywhere it existed; tokens
   are an addition, never a replacement (owner decision).

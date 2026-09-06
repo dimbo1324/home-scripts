@@ -407,8 +407,8 @@ readers by design.
 
 ## Product guardrails
 
-- **Privacy is absolute.** Analysis is local; network access is forbidden everywhere
-  except the explicitly user-initiated AI handoff in stage S13.
+- **Privacy is absolute.** Analysis is local; no workspace crate reaches the network.
+  S13's API path is the excluded `codepack-ai-api` (Q41).
 - **The source is immutable.** Export never writes into the source project folder.
 - **Bytes stay.** Byte-based size reporting is preserved everywhere it existed; tokens
   are an addition, never a replacement (owner decision).
@@ -523,8 +523,8 @@ These sharpen the universal rules for this codebase. Stricter wins.
 
 ## Domain constraints
 
-- **Network access is forbidden** in every crate except the stage S13 integration.
-  Adding an HTTP client anywhere else is a violation.
+- **Network access is forbidden** in every workspace crate; no exception since Q41.
+  S13's client is in the excluded `codepack-ai-api`.
 - **Symlinks are never followed** while walking — this prevents escaping the tree.
 - **Extraction is path-traversal safe**: an entry's target is validated before writing.
 - **Secrets are never logged**: a finding's text is redacted before it reaches a log,

@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 
 use codepack_tokens::estimate_tokens_fallback;
 
-use crate::error::{AiError, Refusal};
 use crate::provider::{AiProvider, AiRequest};
+use codepack_ai::error::{AiError, Refusal};
 
 /// The AI context folder inside an extracted bundle.
 const CONTEXT_DIR: &str = "AI_CONTEXT";

@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::error::AiError;
 use crate::provider::{AiAnswer, AiProvider, AiRequest, ModelInfo};
+use codepack_ai::error::AiError;
 
 const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 

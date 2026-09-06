@@ -5,35 +5,21 @@ edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "Stage S13: the one crate allowed to reach the network, and only on an explicit user action."
+description = "Stage S13's offline half: a prompt file and a command for a coding agent already on the machine."
 
 [lints]
 workspace = true
 
-[features]
-default = ["api"]
-# The API path: an HTTP client and the OS credential store. Off by default for a
-# dependent that only wants the offline handoff, which needs neither.
-#
-# Invariant I1 is what makes this a feature rather than a convenience. `handoff` writes
-# one Markdown file for an agent that is already on the machine — it cannot make a
-# request, and a front end that offers only that should not be *linked against* a
-# transport it never reaches. `cargo xtask gate` checks declared dependencies, so
-# without this split both front ends would ship an HTTP client whose presence no test
-# could distinguish from its use.
-api = ["dep:ureq", "dep:keyring", "dep:codepack-tokens"]
+# No features. The `api` feature that used to live here is now the separate,
+# workspace-excluded `codepack-ai-api` crate: a feature can be switched off by a
+# dependent but not by `cargo test --workspace`, which compiles a member with its own
+# defaults on every platform (owner decision 2026-09-06, Q41).
 
 [dependencies]
 codepack-core.workspace = true
-# Only the API path estimates a request's size, so this follows `api`.
-codepack-tokens = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-# S13: the HTTP client. See the crate docs for why this one and not `reqwest`.
-ureq = { workspace = true, optional = true }
-# S13: BLUEPRINT §D.4 names this crate by name for OS-native secret storage.
-keyring = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

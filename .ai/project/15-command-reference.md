@@ -89,11 +89,20 @@ cargo-deny`, not a toolchain component; CI uses `taiki-e/install-action`).
 it because the references are committed. Run it when legacy's own output *should* change
 — never to make a failing comparison pass.
 
+`cargo xtask ai-api` formats, lints and tests `codepack-ai-api` — the S13 API path, which
+`workspace.exclude` keeps out of the product build (owner decision 2026-09-06, Q41, so
+that `keyring` and `ureq` are not compiled on every platform for code no binary reaches).
+**The gate does not run it**, which is the cost of the exclusion: this crate is preserved,
+not maintained. Run it when touching that crate, and before finishing stage S13. Its
+formatting *is* covered by `cargo xtask fmt` and by the gate's format step, because
+formatting compiles nothing.
+
 ## Platform notes
 
-Target: **Windows 10/11**. macOS and Linux are out of scope for now — BLUEPRINT §B.4
-still calls them a product goal; see `docs/__arch__/open-questions.md` for the decision
-and Q21 for what must be re-diagnosed before they return.
+Target today: **Windows 10/11** — but macOS and Linux are back in the plan as of the
+owner decision 2026-09-06, and the switched-off code below is what has to come back. See
+`docs/__arch__/open-questions.md` for that decision and for the superseded 2026-07-26
+one, and Q21 for what must be re-diagnosed before the two platforms return.
 
 - Windows: long paths and antivirus interfere with temporary directories; prefer a
   repository-local temp directory in tests.

@@ -8,6 +8,23 @@ Format: date, what changed, why, who decided. Newest first.
 
 ---
 
+### 2026-09-06 — no workspace crate reaches the network, and cross-platform is back
+
+**What changed.** `12-domain-rules.md` and `10-project-map.md` both said network access was
+forbidden "except the stage S13 integration". S13's API path now lives in
+`codepack-ai-api`, which `workspace.exclude` keeps out of the product, so the rule is
+absolute inside the workspace and both statements say so. `15-command-reference.md` gains
+`cargo xtask ai-api` — the command that formats, lints and tests that excluded crate — and
+its platform note no longer presents Windows-only as settled.
+
+**Why.** Two owner decisions of 2026-09-06 (Q41, and the reversal of the 2026-07-26
+Windows-only scope). The rule modules described a state that no longer exists, and a rule
+that is factually false is the case `08-rules-evolution.md` names as a mandatory
+correction.
+
+**Who decided.** Owner, 2026-09-06. The wording is the assistant's; the constraints are
+the owner's.
+
 ### 2026-09-06 — a report reaches raw content only through a read that says so
 
 **What changed.** `12-domain-rules.md` gains a rule: raw project file content is available

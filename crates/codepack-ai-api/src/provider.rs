@@ -9,7 +9,7 @@
 //! S13's agreed scope is a single exchange. A trait that guessed at those would be a
 //! trait shaped by imagination rather than by a caller.
 
-use crate::error::AiError;
+use codepack_ai::error::AiError;
 
 /// What gets sent. Assembled by [`crate::plan`] from a bundle the user has already
 /// exported and confirmed.

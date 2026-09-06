@@ -13,13 +13,25 @@ other crate is a violation.
 **Why.** The product handles other people's source code and secrets. Trusting it rests
 entirely on the data not going anywhere.
 
-**How it is enforced (since 2026-07-27).** This stopped being text and became a
-mechanism: the `network isolation` step of `cargo xtask gate` reads every crate manifest
-and fails if an HTTP client is declared anywhere but `codepack-ai`. The reason is the
-shape of the failure — a crate that gains an HTTP client behaves identically until the
-day it makes a request, so "someone will catch it in review" does not work here. Same
-approach as the webview's isolation: not a convention, a mechanism
+**How it is enforced (since 2026-07-27, strengthened 2026-09-06).** This stopped being
+text and became a mechanism: the `network isolation` step of `cargo xtask gate` reads
+every crate manifest and fails if an HTTP client is declared. The reason is the shape of
+the failure — a crate that gains an HTTP client behaves identically until the day it makes
+a request, so "someone will catch it in review" does not work here. Same approach as the
+webview's isolation: not a convention, a mechanism
 (`crates/xtask/src/network_isolation.rs`).
+
+Since 2026-09-06 the check allows **no** exception rather than one. S13's API path moved
+to `codepack-ai-api`, a crate this repository contains but the workspace excludes, so the
+transport is not in the product at all — not in a binary, not in `Cargo.lock`, not in
+`cargo deny`'s graph. The check also refuses a member that depends on that crate, which is
+the one way to bring the client back without naming any client. Owner decision 2026-09-06,
+Q41; the reason was cross-platform rather than tidiness (`keyring` wants Secret Service on
+Linux and was compiled there for code no user could reach).
+
+The checker subtracts `workspace.exclude` from the member globs, as cargo does. It did not,
+and the first thing the exclusion produced was the check reporting the product in violation
+because of a crate the product does not build.
 
 ## I2. The source is immutable
 

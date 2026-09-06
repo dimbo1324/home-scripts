@@ -1,0 +1,69 @@
+[package]
+name = "codepack-ai-api"
+# Spelled out rather than inherited. This package is deliberately **excluded** from the
+# workspace (see the root `Cargo.toml`), and `workspace = true` inheritance is available
+# only to members — so the version, the edition and the lints below are duplicated on
+# purpose. `cargo xtask ai-api` builds and lints this crate with the same denials the
+# workspace uses, which is what keeps the duplication honest.
+version = "2.0.0-dev"
+edition = "2024"
+rust-version = "1.90"
+repository = "https://github.com/dimbo1324/codepack"
+publish = false
+description = "Stage S13's API path: the HTTP client and the OS credential store, kept out of the product workspace."
+
+[dependencies]
+codepack-ai = { path = "../codepack-ai" }
+# Only the API path estimates a request's size.
+codepack-tokens = { path = "../codepack-tokens" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# The two declarations below are copied verbatim from the root manifest, comments
+# included. They record decisions — a licence-policy choice and a platform-trust-store
+# choice — that would be lost if this crate quietly took the defaults instead.
+#
+# S13: chosen over `reqwest` deliberately. This workspace has no async runtime — the
+# engine parallelises with rayon and the desktop runs exports on plain threads — and
+# `reqwest` would pull tokio in for a handful of request/response round trips. `ureq`
+# is blocking, rustls-only (no OpenSSL to build or ship), and MIT/Apache-2.0. Same
+# reasoning that rejected `directories` in S1 and `tiktoken-rs` in S6.
+#
+# The platform's own TLS (SChannel on Windows) rather than rustls with a bundled root
+# list. Two reasons, and the second is why no rustls variant was taken:
+#   1. A desktop tool runs behind corporate TLS-inspecting proxies whose CA lives in the
+#      OS trust store and in no bundle. The OS stack is the one that works there.
+#   2. Every rustls path here drags in a Mozilla root list — `webpki-roots` or
+#      `webpki-root-certs`, both CDLA-Permissive-2.0, which is outside this project's
+#      allowed licence set. Using the OS trust store avoids widening the licence policy
+#      for what is a certificate list rather than code.
+# No OpenSSL is involved on Windows; `native-tls` binds to SChannel there.
+ureq = { version = "3", default-features = false, features = [
+  "native-tls-no-default",
+  "json",
+  "gzip",
+] }
+# S13: OS-native credential storage, named by BLUEPRINT §D.4. The API key must never
+# reach a settings file, so this is not optional infrastructure.
+# Default features are the per-platform native stores (Credential Manager, Keychain,
+# Secret Service) — exactly the three BLUEPRINT §D.4 names, so nothing to narrow here.
+#
+# This dependency is the reason the package sits outside the workspace: Secret Service
+# wants a running D-Bus session on Linux, and a workspace member is compiled by
+# `cargo test --workspace` on every platform whether or not any binary can reach it.
+keyring = "4"
+
+[dev-dependencies]
+tempfile = "3.27"
+
+# Duplicated from `[workspace.lints]` in the root manifest, entry for entry.
+[lints.rust]
+unsafe_code = "forbid"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+print_stdout = "warn"
+todo = "warn"

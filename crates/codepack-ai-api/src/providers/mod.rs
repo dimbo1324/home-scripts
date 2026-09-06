@@ -3,8 +3,8 @@
 
 pub mod anthropic;
 
-use crate::error::AiError;
 use crate::provider::AiProvider;
+use codepack_ai::error::AiError;
 
 /// Every provider this build supports.
 pub fn all() -> Vec<Box<dyn AiProvider>> {

@@ -1,5 +1,8 @@
 # --- Rust ---
 /target/
+# `codepack-ai-api` is excluded from the workspace (Q41), so it builds into its own
+# target directory rather than the shared one above.
+/crates/codepack-ai-api/target/
 **/*.rs.bk
 *.pdb
 

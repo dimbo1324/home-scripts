@@ -14,7 +14,7 @@ use std::sync::Once;
 
 use keyring::Entry;
 
-use crate::error::AiError;
+use codepack_ai::error::AiError;
 
 /// The credential-store service name. Stable: changing it orphans every stored key.
 const SERVICE: &str = "codepack";

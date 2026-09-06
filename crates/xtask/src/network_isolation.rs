@@ -13,8 +13,13 @@
 
 use std::path::Path;
 
-/// The one crate permitted a network client. See `crates/codepack-ai/src/lib.rs`.
-const ALLOWED: &str = "codepack-ai";
+/// The crate that holds S13's HTTP client, and which no workspace member may depend on.
+///
+/// It is not a workspace member: the root manifest excludes it (owner decision
+/// 2026-09-06, Q41). A member that took it as a path dependency would pull `ureq` and
+/// `keyring` straight back into the product, which is the one way to undo the exclusion
+/// without touching `NETWORK_CRATES`.
+const EXCLUDED_API_CRATE: &str = "codepack-ai-api";
 
 /// Dependencies that can perform network I/O.
 ///
@@ -51,44 +56,34 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
         let Some(package) = package_name(&text) else {
             continue;
         };
-        if package == ALLOWED {
-            continue;
-        }
 
         for dependency in declared_dependencies(&text) {
             if NETWORK_CRATES.contains(&dependency.as_str()) {
                 offenders.push(format!("{package} depends on {dependency}"));
             }
-        }
-
-        if let Some(line) = declaration_of(&text, ALLOWED) {
-            // Only the API path carries a client. A dependent that asks for it by name
-            // has made a decision; one that inherits it has not.
-            if line.contains("\"api\"") {
+            // The other way back in. `codepack-ai-api` declares the client itself, so a
+            // member depending on it inherits one without naming any crate from the list
+            // above.
+            if dependency == EXCLUDED_API_CRATE {
                 offenders.push(format!(
-                    "{package} enables {ALLOWED}'s \"api\" feature, which brings an HTTP \
-                     client and the credential store with it"
-                ));
-            }
-            if !workspace_takes_ai_without_default_features(root)? {
-                offenders.push(format!(
-                    "{package} depends on {ALLOWED}, but the workspace declares it with \
-                     default features, so the HTTP client arrives transitively"
+                    "{package} depends on {EXCLUDED_API_CRATE}, which carries the HTTP \
+                     client and the credential store"
                 ));
             }
         }
     }
 
     if offenders.is_empty() {
-        println!("network isolation ok: only {ALLOWED} may reach the network (invariant I1).");
+        println!("network isolation ok: no workspace crate may reach the network (invariant I1).");
         return Ok(());
     }
 
     Err(format!(
-        "invariant I1 violated — a crate other than {ALLOWED} declares a network \
-         client:\n  {}\n\nAll analysis is local. If a new stage genuinely needs the \
-         network, that is an owner decision recorded in \
-         docs/__arch__/open-questions.md, not a dependency added in passing.",
+        "invariant I1 violated — a workspace crate declares a network client:\n  {}\n\n\
+         All analysis is local, and since Q41 the one exception lives outside the \
+         workspace entirely. If a new stage genuinely needs the network, that is an owner \
+         decision recorded in docs/__arch__/open-questions.md, not a dependency added in \
+         passing.",
         offenders.join("\n  ")
     ))
 }
@@ -109,12 +104,29 @@ fn workspace_manifests(root: &Path) -> Result<Vec<std::path::PathBuf>, String> {
         .parse::<toml::Table>()
         .map_err(|error| format!("could not parse {}: {error}", root_manifest.display()))?;
 
-    let members = parsed
-        .get("workspace")
-        .and_then(toml::Value::as_table)
+    let workspace = parsed.get("workspace").and_then(toml::Value::as_table);
+
+    let members = workspace
         .and_then(|workspace| workspace.get("members"))
         .and_then(toml::Value::as_array)
         .ok_or_else(|| format!("{} declares no workspace members", root_manifest.display()))?;
+
+    // `exclude` subtracts from the glob, exactly as cargo does. Without this the check
+    // walks packages cargo does not build — and it did: `crates/*` swept up
+    // `codepack-ai-api`, whose whole purpose is to be outside the workspace, and the
+    // check reported the product violating I1 because of a crate the product does not
+    // contain. A checker whose idea of membership differs from cargo's is wrong in both
+    // directions; this is the one that bit.
+    let excluded: Vec<&str> = workspace
+        .and_then(|workspace| workspace.get("exclude"))
+        .and_then(toml::Value::as_array)
+        .map(|entries| entries.iter().filter_map(toml::Value::as_str).collect())
+        .unwrap_or_default();
+    let is_excluded = |path: &Path| {
+        excluded
+            .iter()
+            .any(|entry| path == root.join(entry).join("Cargo.toml"))
+    };
 
     let mut manifests = Vec::new();
     for member in members.iter().filter_map(toml::Value::as_str) {
@@ -125,14 +137,14 @@ fn workspace_manifests(root: &Path) -> Result<Vec<std::path::PathBuf>, String> {
                     .map_err(|error| format!("could not read {}: {error}", dir.display()))?;
                 for entry in entries.flatten() {
                     let manifest = entry.path().join("Cargo.toml");
-                    if manifest.is_file() {
+                    if manifest.is_file() && !is_excluded(&manifest) {
                         manifests.push(manifest);
                     }
                 }
             }
             None => {
                 let manifest = root.join(member).join("Cargo.toml");
-                if manifest.is_file() {
+                if manifest.is_file() && !is_excluded(&manifest) {
                     manifests.push(manifest);
                 }
             }
@@ -208,51 +220,6 @@ fn package_name(manifest: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Whether the workspace root hands [`ALLOWED`] out without its default features.
-///
-/// Checked at the root rather than per member because that is where cargo resolves it:
-/// a member inheriting `workspace = true` cannot switch default features off itself
-/// (cargo rejects the override), so the root entry is the only place the decision can
-/// live — and therefore the only honest place to verify it.
-///
-/// A root that does not mention the crate at all satisfies this vacuously: nothing can
-/// inherit what is not declared, and the per-member checks still apply.
-fn workspace_takes_ai_without_default_features(root: &Path) -> Result<bool, String> {
-    let manifest = root.join("Cargo.toml");
-    let Ok(text) = std::fs::read_to_string(&manifest) else {
-        return Err(format!("could not read {}", manifest.display()));
-    };
-    Ok(match declaration_of(&text, ALLOWED) {
-        Some(line) => line.contains("default-features = false"),
-        None => true,
-    })
-}
-
-/// The whole declaration line for `name`, if the manifest declares it as a dependency.
-///
-/// Returned as raw text rather than parsed: the only question asked of it is whether it
-/// switches default features off, and that is one substring.
-fn declaration_of(manifest: &str, name: &str) -> Option<String> {
-    let mut in_dependencies = false;
-
-    for line in manifest.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_dependencies = trimmed.contains("dependencies");
-            continue;
-        }
-        if !in_dependencies || trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        if let Some((key, _)) = trimmed.split_once('=')
-            && key.trim().trim_matches('"') == name
-        {
-            return Some(trimmed.to_string());
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod list_tests {
     use std::collections::HashSet;
@@ -310,39 +277,39 @@ mod tests {
     }
 
     #[test]
-    fn a_front_end_inheriting_the_ai_crate_with_default_features_is_rejected() {
-        // `codepack-ai`'s offline handoff needs no transport, so a front end that offers
-        // only that must not link one. Declared dependencies are all this check can see,
-        // which is exactly why the feature split has to be visible in a manifest.
-        let root = scratch_workspace("ai-default-features");
-        write_root_manifest(&root, "codepack-ai = { path = \"crates/codepack-ai\" }");
+    fn a_member_depending_on_the_excluded_api_crate_is_rejected() {
+        // The one way back in that names no crate from `NETWORK_CRATES`:
+        // `codepack-ai-api` declares `ureq` and `keyring` itself, so a member that takes
+        // it as a path dependency inherits both and the exclusion has been undone
+        // (owner decision 2026-09-06, Q41).
+        let root = scratch_workspace("depends-on-api-crate");
+        write_bare_root_manifest(&root);
+        write_crate(
+            &root,
+            "codepack-cli",
+            "[dependencies]\ncodepack-ai-api = { path = \"../codepack-ai-api\" }\n",
+        );
+
+        let error = check(&root).unwrap_err();
+        assert!(error.contains("codepack-ai-api"), "{error}");
+        assert!(error.contains("credential store"), "{error}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_offline_ai_crate_is_an_ordinary_dependency_now() {
+        // Since the API path moved out, `codepack-ai` carries no transport at all, so
+        // depending on it needs no feature discipline and no special case in this check.
+        let root = scratch_workspace("ai-offline-ordinary");
+        write_bare_root_manifest(&root);
         write_crate(
             &root,
             "codepack-cli",
             "[dependencies]\ncodepack-ai = { workspace = true }\n",
         );
 
-        let error = check(&root).unwrap_err();
-        assert!(error.contains("default features"), "{error}");
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn a_front_end_asking_for_the_api_feature_by_name_is_rejected() {
-        let root = scratch_workspace("ai-api-feature");
-        write_root_manifest(
-            &root,
-            "codepack-ai = { path = \"c\", default-features = false }",
-        );
-        write_crate(
-            &root,
-            "codepack-cli",
-            "[dependencies]\ncodepack-ai = { workspace = true, features = [\"api\"] }\n",
-        );
-
-        let error = check(&root).unwrap_err();
-        assert!(error.contains("\"api\" feature"), "{error}");
+        assert!(check(&root).is_ok());
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -441,14 +408,87 @@ windows-sys = "0.61"
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// There is no longer an allowed crate. Every member is held to the same rule, which
+    /// is what the exclusion bought — and a test that still granted an exemption would
+    /// quietly permit exactly the regression Q41 removed.
     #[test]
-    fn the_allowed_crate_may_declare_one() {
-        let root = scratch_workspace("allowed");
+    fn no_member_is_exempt_not_even_the_ai_crate() {
+        let root = scratch_workspace("no-exemption");
         write_bare_root_manifest(&root);
-        write_crate(&root, ALLOWED, "[dependencies]\nureq = \"3\"\n");
+        write_crate(&root, "codepack-ai", "[dependencies]\nureq = \"3\"\n");
         write_crate(&root, "codepack-core", "[dependencies]\nserde = \"1\"\n");
 
-        assert!(check(&root).is_ok());
+        let error = check(&root).unwrap_err();
+        assert!(error.contains("codepack-ai depends on ureq"), "{error}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `exclude` subtracts from the glob, as it does for cargo. This is the bug that
+    /// appeared the moment `codepack-ai-api` was moved out: `crates/*` still swept it up,
+    /// so the check reported the product violating I1 because of a crate the product does
+    /// not build.
+    #[test]
+    fn an_excluded_directory_is_not_treated_as_a_member() {
+        let root = scratch_workspace("excluded-member");
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]
+members = [\"crates/*\"]
+exclude = [\"crates/outsider\"]
+",
+        )
+        .unwrap();
+        write_crate(
+            &root,
+            "codepack-core",
+            "[dependencies]
+serde = \"1\"
+",
+        );
+        // Would fail the check if it were treated as a member.
+        write_crate(
+            &root,
+            "outsider",
+            "[dependencies]
+ureq = \"3\"
+",
+        );
+
+        assert!(check(&root).is_ok(), "{:?}", check(&root));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// And the exclusion is not a blanket amnesty: remove the entry and the same crate is
+    /// caught, so the test above is passing for the right reason.
+    #[test]
+    fn the_same_crate_without_the_exclusion_is_caught() {
+        let root = scratch_workspace("excluded-member-control");
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]
+members = [\"crates/*\"]
+",
+        )
+        .unwrap();
+        write_crate(
+            &root,
+            "codepack-core",
+            "[dependencies]
+serde = \"1\"
+",
+        );
+        write_crate(
+            &root,
+            "outsider",
+            "[dependencies]
+ureq = \"3\"
+",
+        );
+
+        let error = check(&root).unwrap_err();
+        assert!(error.contains("outsider depends on ureq"), "{error}");
 
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -25,8 +25,8 @@ These sharpen the universal rules for this codebase. Stricter wins.
 
 ## Domain constraints
 
-- **Network access is forbidden** in every crate except the stage S13 integration.
-  Adding an HTTP client anywhere else is a violation.
+- **Network access is forbidden** in every workspace crate; no exception since Q41.
+  S13's client is in the excluded `codepack-ai-api`.
 - **Symlinks are never followed** while walking — this prevents escaping the tree.
 - **Extraction is path-traversal safe**: an entry's target is validated before writing.
 - **Secrets are never logged**: a finding's text is redacted before it reaches a log,

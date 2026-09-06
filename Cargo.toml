@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "apps/desktop/src-tauri"]
+# Stage S13's API path. In the repository, not in the product build: `members` is a glob,
+# so the exclusion has to be explicit. A workspace member is compiled with its own default
+# features by `cargo test --workspace` on every platform — which is how `keyring` (Secret
+# Service on Linux) came to obstruct builds for code no binary could reach. Owner decision
+# 2026-09-06, Q41. Built and linted by `cargo xtask ai-api`.
+exclude = ["crates/codepack-ai-api"]
 
 [workspace.package]
 version = "2.0.0-dev"
@@ -131,36 +137,9 @@ notify = { version = "8", default-features = false, features = ["macos_fsevent"]
 # and only on an explicit user action (invariant I1). `cargo xtask gate` fails if any
 # other crate declares an HTTP client.
 #
-# Taken WITHOUT default features: `codepack-ai`'s offline handoff — the only part either
-# front end uses — needs no HTTP client and no credential store, and a binary should not
-# link a transport it cannot reach. A dependent that genuinely wants the API path asks
-# for `features = ["api"]` in its own manifest, where the gate can see it.
-codepack-ai = { path = "crates/codepack-ai", default-features = false }
-# S13: chosen over `reqwest` deliberately. This workspace has no async runtime — the
-# engine parallelises with rayon and the desktop runs exports on plain threads — and
-# `reqwest` would pull tokio in for a handful of request/response round trips. `ureq`
-# is blocking, rustls-only (no OpenSSL to build or ship), and MIT/Apache-2.0. Same
-# reasoning that rejected `directories` in S1 and `tiktoken-rs` in S6.
-#
-# The platform's own TLS (SChannel on Windows) rather than rustls with a bundled root
-# list. Two reasons, and the second is why no rustls variant was taken:
-#   1. A desktop tool runs behind corporate TLS-inspecting proxies whose CA lives in the
-#      OS trust store and in no bundle. The OS stack is the one that works there.
-#   2. Every rustls path here drags in a Mozilla root list — `webpki-roots` or
-#      `webpki-root-certs`, both CDLA-Permissive-2.0, which is outside this project's
-#      allowed licence set. Using the OS trust store avoids widening the licence policy
-#      for what is a certificate list rather than code.
-# No OpenSSL is involved on Windows; `native-tls` binds to SChannel there.
-ureq = { version = "3", default-features = false, features = [
-  "native-tls-no-default",
-  "json",
-  "gzip",
-] }
-# S13: OS-native credential storage, named by BLUEPRINT §D.4. The API key must never
-# reach a settings file, so this is not optional infrastructure.
-# Default features are the per-platform native stores (Credential Manager, Keychain,
-# Secret Service) — exactly the three BLUEPRINT §D.4 names, so nothing to narrow here.
-keyring = "4"
+# The offline handoff, and nothing else — the API path moved to the excluded
+# `codepack-ai-api` crate (Q41), so there is no longer a feature to switch off here.
+codepack-ai = { path = "crates/codepack-ai" }
 # 2026-07-28 (codepack-sanitize, "Sterile copy" — docs/__arch__/open-questions.md):
 # real-grammar comment stripping, chosen explicitly over regex by the owner. `tree-sitter`
 # itself and every Batch 1 grammar below are maintained under the `tree-sitter`/
