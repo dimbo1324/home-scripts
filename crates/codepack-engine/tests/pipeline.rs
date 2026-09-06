@@ -978,6 +978,11 @@ fn with_disclosure_off_no_artifact_names_the_machines_directories() {
     // passed for that reason alone until it was checked against a real bundle, which
     // still carried the path in `28_export_plan.json`. Both spellings, therefore.
     let escaped_path = secret_path.replace('\\', "\\\\");
+    // And a third spelling: an artifact that normalises separators writes
+    // `C:/Users/...`, which matches neither of the two above. On Unix all three
+    // collapse to one string, which is why both Unix runners could see a leak this
+    // test could not (2026-09-06).
+    let slashed_path = secret_path.replace('\\', "/");
     let mut offenders = Vec::new();
     for entry in walkdir::WalkDir::new(&outcome.paths.staging_dir)
         .into_iter()
@@ -996,10 +1001,18 @@ fn with_disclosure_off_no_artifact_names_the_machines_directories() {
         if is_copied_source {
             continue;
         }
-        if let Ok(text) = fs::read_to_string(entry.path())
-            && (text.contains(&secret_path) || text.contains(&escaped_path))
-        {
-            offenders.push(relative.display().to_string());
+        let Ok(text) = fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        // The offending line, not just the file name: this assertion is read from a CI
+        // annotation on two platforms this machine cannot run, and "some artifact leaks"
+        // costs a whole round to turn into "this line does".
+        if let Some(line) = text.lines().find(|line| {
+            line.contains(&secret_path)
+                || line.contains(&escaped_path)
+                || line.contains(&slashed_path)
+        }) {
+            offenders.push(format!("{} — {}", relative.display(), line.trim()));
         }
     }
 

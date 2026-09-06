@@ -288,13 +288,16 @@ fn write_git_deep_report(ctx: &ReportContext<'_>, output_file: &Path) -> Result<
         "git log --decorate --graph -20 --date=iso-strict --pretty=%h %cd %s",
         &recent_log(&repo, 20),
     );
+    // Not `repo.workdir()`: that is the machine's absolute path, and this section was
+    // the last artifact still printing one with `disclose_absolute_paths` off. It hid
+    // from the bundle-wide test because libgit2 renders a Windows path with forward
+    // slashes, matching neither spelling the test searched for; both Unix runners saw it
+    // at once (2026-09-06). The header line above already answers the same question,
+    // through the same method, so this now agrees with it.
     write_section(
         &mut out,
         "git rev-parse --show-toplevel",
-        &[repo
-            .workdir()
-            .map(|path| path.display().to_string())
-            .unwrap_or_default()],
+        &[ctx.disclosed_source_root()],
     );
 
     std::fs::write(output_file, out).map_err(|source| ReportError::Write {
@@ -363,5 +366,47 @@ mod tests {
         assert!(content.contains("main.py"));
         assert!(!content.contains("sk-super-secret-value"));
         assert!(content.contains("<REDACTED>"));
+    }
+
+    /// The `git rev-parse --show-toplevel` section used to print libgit2's own workdir,
+    /// which is the machine's absolute path whatever `disclose_absolute_paths` says. Its
+    /// spelling — forward slashes on Windows too — is what let it slip past the
+    /// bundle-wide sweep until both Unix runners failed on it.
+    #[test]
+    fn the_toplevel_section_never_names_the_machines_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = init_repo(dir.path());
+        write_file(dir.path(), "main.py", "print('hi')\n");
+        commit_all(&repo, "init");
+
+        let plan = crate::test_support::build_plan(dir.path());
+        let inventory = crate::context::Inventory::from_plan(&plan);
+        let config = codepack_core::config::Config {
+            disclose_absolute_paths: false,
+            ..codepack_core::config::Config::default()
+        };
+        let cancel = codepack_core::CancellationToken::new();
+        let ctx = ReportContext {
+            source_root: dir.path().to_path_buf(),
+            staging_root: dir.path().to_path_buf(),
+            inventory: &inventory,
+            plan: &plan,
+            scan: None,
+            diff: None,
+            config: &config,
+            cancel: &cancel,
+            profile: "full",
+        };
+        let out_dir = tempfile::tempdir().unwrap();
+        let output_file = out_dir.path().join(JOB.filename);
+
+        write_git_deep_report(&ctx, &output_file).unwrap();
+
+        let content = std::fs::read_to_string(&output_file).unwrap();
+        let root = dir.path().display().to_string();
+        for spelling in [root.clone(), root.replace('\\', "/")] {
+            assert!(!content.contains(&spelling), "the report names {spelling}");
+        }
+        assert!(content.contains("$ git rev-parse --show-toplevel"));
     }
 }

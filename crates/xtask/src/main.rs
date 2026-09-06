@@ -15,6 +15,7 @@ mod report_redaction;
 mod scripts;
 mod sync_agents;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -93,11 +94,76 @@ fn run_tests(root: &Path) -> Result<(), String> {
     }
 
     if std::env::var_os("CI").is_some() {
+        let details = failure_details(&stdout);
         for name in failed_test_names(&stdout) {
-            println!("::error title=failing test::{name}");
+            match details.get(&name) {
+                Some(reason) if !reason.is_empty() => {
+                    println!(
+                        "::error title=failing test::{name}%0A{}",
+                        annotation_body(reason)
+                    );
+                }
+                _ => println!("::error title=failing test::{name}"),
+            }
         }
     }
     Err("tests".to_string())
+}
+
+/// What each failed test printed, keyed by name.
+///
+/// The name says which test broke; this says why. Without it every diagnosis costs
+/// another push and another CI round, which is the same shape of problem the annotations
+/// were added to solve one level up — the assertion message exists only in the log, and
+/// the log needs admin rights on the repository.
+///
+/// Cargo prints a failed test's captured output under `---- <name> stdout ----`, which is
+/// where the panic line and any assertion message land.
+fn failure_details(stdout: &str) -> BTreeMap<String, String> {
+    let mut details: BTreeMap<String, String> = BTreeMap::new();
+    let mut current: Option<(String, Vec<&str>)> = None;
+    let finish = |current: Option<(String, Vec<&str>)>, details: &mut BTreeMap<_, _>| {
+        if let Some((name, body)) = current {
+            details.insert(name, body.join("\n").trim().to_string());
+        }
+    };
+
+    for line in stdout.lines() {
+        if let Some(name) = line
+            .strip_prefix("---- ")
+            .and_then(|rest| rest.strip_suffix(" stdout ----"))
+        {
+            finish(current.take(), &mut details);
+            current = Some((name.to_string(), Vec::new()));
+        } else if line.trim() == "failures:" {
+            // The name list follows, and it is not part of the last test's output.
+            finish(current.take(), &mut details);
+        } else if let Some((_, body)) = current.as_mut() {
+            body.push(line);
+        }
+    }
+    finish(current, &mut details);
+    details
+}
+
+/// One captured output, made safe and short enough to travel as an annotation.
+///
+/// A workflow command reads `%`, CR and LF as its own structure, so an unescaped panic
+/// message silently truncates the annotation at the first newline. The clip keeps the
+/// first lines, which is where the panic and the assertion message are; a backtrace below
+/// them is not worth the width.
+fn annotation_body(reason: &str) -> String {
+    const LIMIT: usize = 600;
+    let clipped: String = reason.chars().take(LIMIT).collect();
+    let clipped = if clipped.len() < reason.len() {
+        format!("{clipped}…")
+    } else {
+        clipped
+    };
+    clipped
+        .replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
 }
 
 /// Test names from cargo's `failures:` block.
@@ -374,6 +440,38 @@ test result: FAILED. 1 passed; 2 failed; 0 ignored
         let green = "running 2 tests\ntest one ... ok\ntest two ... ok\n\n\
                      test result: ok. 2 passed; 0 failed; 0 ignored\n";
         assert!(failed_test_names(green).is_empty());
+    }
+
+    /// The name alone was never the useful half. This is the reason travelling with it.
+    #[test]
+    fn each_failing_test_carries_the_output_it_printed() {
+        let details = failure_details(CARGO_OUTPUT);
+        assert_eq!(details.len(), 2);
+        assert!(
+            details["a_failing_one"].starts_with("thread 'a_failing_one' panicked"),
+            "{:?}",
+            details["a_failing_one"]
+        );
+        assert!(details["a_failing_one"].ends_with("assertion failed"));
+        // The `failures:` name list is not part of the last test's captured output.
+        assert!(!details["another_failing_one"].contains("a_failing_one"));
+    }
+
+    /// A workflow command ends at the first newline, so an unescaped panic message would
+    /// arrive as one line of a multi-line reason and the rest would vanish.
+    #[test]
+    fn an_annotation_body_escapes_what_a_workflow_command_would_eat() {
+        let body = annotation_body("100%_PANIC\nsecond line");
+        assert_eq!(body, "100%25_PANIC%0Asecond line");
+    }
+
+    /// Clipping keeps the head — the panic line and the assertion message — and says so.
+    #[test]
+    fn an_over_long_reason_is_clipped_rather_than_sent_whole() {
+        let long = "x".repeat(1_000);
+        let body = annotation_body(&long);
+        assert_eq!(body.chars().count(), 601);
+        assert!(body.ends_with('…'));
     }
 
     /// Several test binaries in one `cargo test --workspace` run each print their own
